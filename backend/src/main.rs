@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use tower_http::cors::CorsLayer;
 
+mod audio;
+
 #[derive(Serialize, Deserialize, Clone)]
 struct Playlist {
     name: String,
@@ -66,6 +68,27 @@ async fn health() -> Json<serde_json::Value> {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("decode") {
+        let path = PathBuf::from(
+            args.get(2).map(String::as_str).unwrap_or("testdata/sample.mp3"),
+        );
+        match audio::decode_file(&path) {
+            Ok(stats) => {
+                println!("decoded: {}", path.display());
+                println!("  sample rate: {} Hz", stats.sample_rate);
+                println!("  channels:    {}", stats.channels);
+                println!("  frames:      {}", stats.total_frames);
+                println!("  duration:    {:.2} s", stats.duration_secs);
+            }
+            Err(e) => {
+                eprintln!("decode failed for {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let config = load_or_create_config();
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
 
