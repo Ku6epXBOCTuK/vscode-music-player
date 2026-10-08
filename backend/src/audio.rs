@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fs::File;
 use std::path::Path;
 
+use rubato::{FftFixedIn, Resampler};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -10,6 +11,9 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+pub const TARGET_RATE: u32 = 48000;
+const RESAMPLE_CHUNK: usize = 4096;
+
 pub struct DecodeStats {
     pub sample_rate: u32,
     pub channels: usize,
@@ -17,7 +21,13 @@ pub struct DecodeStats {
     pub duration_secs: f64,
 }
 
-pub fn decode_file(path: &Path) -> Result<DecodeStats, Box<dyn Error>> {
+struct RawPcm {
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: usize,
+}
+
+fn decode_raw(path: &Path) -> Result<RawPcm, Box<dyn Error>> {
     let file = File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -36,12 +46,12 @@ pub fn decode_file(path: &Path) -> Result<DecodeStats, Box<dyn Error>> {
 
     let track = format.default_track().ok_or("no default audio track")?;
     let track_id = track.id;
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())?;
+    let mut decoder =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
 
     let mut sample_rate = 0;
     let mut channels = 0;
-    let mut total_frames: u64 = 0;
+    let mut samples: Vec<f32> = Vec::new();
 
     loop {
         let packet = match format.next_packet() {
@@ -69,19 +79,106 @@ pub fn decode_file(path: &Path) -> Result<DecodeStats, Box<dyn Error>> {
 
         let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         buf.copy_interleaved_ref(decoded);
-        total_frames += (buf.samples().len() / channels.max(1)) as u64;
+        samples.extend_from_slice(buf.samples());
     }
 
-    let duration_secs = if sample_rate > 0 {
-        total_frames as f64 / sample_rate as f64
+    Ok(RawPcm {
+        samples,
+        sample_rate,
+        channels,
+    })
+}
+
+pub fn decode_file(path: &Path) -> Result<DecodeStats, Box<dyn Error>> {
+    let raw = decode_raw(path)?;
+    let total_frames = (raw.samples.len() / raw.channels.max(1)) as u64;
+    let duration_secs = if raw.sample_rate > 0 {
+        total_frames as f64 / raw.sample_rate as f64
     } else {
         0.0
     };
 
     Ok(DecodeStats {
-        sample_rate,
-        channels,
+        sample_rate: raw.sample_rate,
+        channels: raw.channels,
         total_frames,
         duration_secs,
     })
+}
+
+fn to_stereo(samples: &[f32], channels: usize) -> [Vec<f32>; 2] {
+    let frames = samples.len() / channels.max(1);
+    let mut left = Vec::with_capacity(frames);
+    let mut right = Vec::with_capacity(frames);
+
+    for frame in 0..frames {
+        let l = samples[frame * channels];
+        let r = if channels > 1 {
+            samples[frame * channels + 1]
+        } else {
+            l
+        };
+        left.push(l);
+        right.push(r);
+    }
+
+    [left, right]
+}
+
+fn interleave(left: &[f32], right: &[f32]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(left.len() * 2);
+    for i in 0..left.len() {
+        out.push(left[i]);
+        out.push(right[i]);
+    }
+    out
+}
+
+fn resample_to_target(left: Vec<f32>, right: Vec<f32>, in_rate: u32) -> Result<Vec<f32>, Box<dyn Error>> {
+    if in_rate == TARGET_RATE {
+        return Ok(interleave(&left, &right));
+    }
+
+    let mut resampler =
+        FftFixedIn::<f32>::new(in_rate as usize, TARGET_RATE as usize, RESAMPLE_CHUNK, 2, 2)?;
+
+    let frames = left.len();
+    let mut out_left: Vec<f32> = Vec::new();
+    let mut out_right: Vec<f32> = Vec::new();
+
+    let mut pos = 0;
+    while pos < frames {
+        let end = (pos + RESAMPLE_CHUNK).min(frames);
+        let input = vec![left[pos..end].to_vec(), right[pos..end].to_vec()];
+
+        let result = if end - pos < RESAMPLE_CHUNK {
+            resampler.process_partial(Some(&input), None)?
+        } else {
+            resampler.process(&input, None)?
+        };
+
+        out_left.extend_from_slice(&result[0]);
+        out_right.extend_from_slice(&result[1]);
+        pos = end;
+    }
+
+    Ok(interleave(&out_left, &out_right))
+}
+
+pub fn decode_to_pcm(path: &Path, gain: f32) -> Result<Vec<f32>, Box<dyn Error>> {
+    let raw = decode_raw(path)?;
+    if raw.channels == 0 || raw.sample_rate == 0 {
+        return Err("decoded file has no audio".into());
+    }
+
+    let [left, right] = to_stereo(&raw.samples, raw.channels);
+    let mut pcm = resample_to_target(left, right, raw.sample_rate)?;
+
+    if gain != 1.0 {
+        for s in pcm.iter_mut() {
+            *s *= gain;
+        }
+    }
+
+    Ok(pcm)
 }

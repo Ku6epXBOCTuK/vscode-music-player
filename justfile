@@ -1,6 +1,6 @@
-# Run the backend (config.json is created next to the exe in target/debug)
+# Run the backend (release build: debug FLAC encoding is too slow)
 backend:
-    cargo run --manifest-path backend/Cargo.toml
+    cargo run --release --manifest-path backend/Cargo.toml
 
 # Build the backend in release mode
 backend-build:

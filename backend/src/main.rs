@@ -1,10 +1,17 @@
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{header, StatusCode};
+use axum::response::Response;
 use axum::{routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
 mod audio;
+mod streamer;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Playlist {
@@ -66,6 +73,41 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
+async fn stream_handler(State(state): State<Arc<streamer::SharedAudio>>) -> Response {
+    let (mut rx, snapshot) = {
+        let recent = state.recent.read().expect("recent buffer poisoned");
+        let rx = state.tx.subscribe();
+        let snapshot: Vec<bytes::Bytes> = recent.iter().cloned().collect();
+        (rx, snapshot)
+    };
+    let header_bytes = state.header.clone();
+
+    let body = async_stream::stream! {
+        yield Ok::<bytes::Bytes, std::io::Error>(header_bytes);
+        for chunk in snapshot {
+            yield Ok(chunk);
+        }
+        loop {
+            match rx.recv().await {
+                Ok(chunk) => yield Ok(chunk),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("stream client lagged by {n} chunks");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "audio/flac")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "keep-alive")
+        .body(Body::from_stream(body))
+        .expect("failed to build stream response")
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -86,15 +128,46 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        match audio::decode_to_pcm(&path, 0.8) {
+            Ok(pcm) => {
+                println!(
+                    "resampled:   {} frames @ {} Hz stereo (gain 0.8)",
+                    pcm.len() / 2,
+                    audio::TARGET_RATE
+                );
+            }
+            Err(e) => {
+                eprintln!("resample failed for {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
     let config = load_or_create_config();
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
 
+    let pcm = match audio::decode_to_pcm(std::path::Path::new("testdata/sample.mp3"), config.volume)
+    {
+        Ok(pcm) => pcm,
+        Err(e) => {
+            eprintln!("failed to decode testdata/sample.mp3: {e}");
+            std::process::exit(1);
+        }
+    };
+    let shared = match streamer::start_broadcast(pcm) {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            eprintln!("failed to start audio broadcast: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let app = Router::new()
         .route("/api/health", get(health))
-        .layer(CorsLayer::permissive());
+        .route("/stream", get(stream_handler))
+        .layer(CorsLayer::permissive())
+        .with_state(shared);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
