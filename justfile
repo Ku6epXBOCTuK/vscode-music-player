@@ -1,3 +1,7 @@
+# Show available recipes
+default:
+    @just --list
+
 # Run the backend (release build: debug FLAC encoding is too slow)
 # The recipe ignores the exit code: Ctrl+C interrupts just itself (exit 512)
 backend: backend-build
@@ -6,6 +10,10 @@ backend: backend-build
 # Build the backend in release mode
 backend-build:
     cargo build --release --manifest-path backend/Cargo.toml
+
+# Lint with clippy
+check:
+    cargo clippy --manifest-path backend/Cargo.toml --release
 
 # Decode an audio file and print stats (stage 1 check)
 decode FILE="testdata/sample.mp3":

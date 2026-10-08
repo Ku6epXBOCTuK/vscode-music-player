@@ -10,7 +10,7 @@ use flacenc::config::Encoder as EncoderConfig;
 use flacenc::encode_fixed_size_frame;
 use flacenc::error::Verify;
 use flacenc::source::{Fill, FrameBuf};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::audio;
 use crate::player::{self, Status};
@@ -31,6 +31,7 @@ pub struct SharedAudio {
 pub fn start_encoder(
     mut pcm_rx: mpsc::Receiver<Vec<f32>>,
     player: player::Shared,
+    mut epoch_rx: watch::Receiver<u64>,
 ) -> Result<SharedAudio, Box<dyn Error>> {
     let encoder_config = EncoderConfig::default()
         .into_verified()
@@ -65,6 +66,7 @@ pub fn start_encoder(
         let mut next_deadline = tokio::time::Instant::now();
         let mut frame_number: usize = 0;
         let mut underruns: u64 = 0;
+        epoch_rx.borrow_and_update();
         let mut framebuf = match FrameBuf::with_size(2, BLOCK_SIZE) {
             Ok(fb) => fb,
             Err(e) => {
@@ -74,6 +76,16 @@ pub fn start_encoder(
         };
 
         loop {
+            // playlist switch: drop buffered audio from the previous source
+            if epoch_rx.has_changed().unwrap_or(false) {
+                let epoch = *epoch_rx.borrow_and_update();
+                let mut dropped = 0u64;
+                while pcm_rx.try_recv().is_ok() {
+                    dropped += 1;
+                }
+                println!("source switched (epoch {epoch}), flushed {dropped} stale blocks");
+            }
+
             let (playing, volume) = {
                 let s = player.read().expect("player state poisoned");
                 (
@@ -93,7 +105,7 @@ pub fn start_encoder(
                     }
                     Err(_) => {
                         underruns += 1;
-                        if underruns == 1 || underruns % 500 == 0 {
+                        if underruns == 1 || underruns.is_multiple_of(500) {
                             eprintln!("pcm underrun: encoder starved ({underruns} blocks)");
                         }
                         vec![0.0; BLOCK_SIZE * 2]

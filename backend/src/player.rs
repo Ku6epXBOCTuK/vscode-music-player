@@ -1,10 +1,11 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
-use crate::{audio, streamer};
+use crate::{audio, pump};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Playlist {
@@ -56,7 +57,7 @@ fn build_queue(playlist: &Playlist) -> Result<Vec<PathBuf>, String> {
                 Ok(files)
             }
         }
-        "network_radio" => Err("network radio is not implemented yet".to_string()),
+        "network_radio" => Ok(Vec::new()),
         other => Err(format!("unknown playlist type: {other}")),
     }
 }
@@ -67,6 +68,7 @@ pub fn spawn(
     initial_queue: Vec<PathBuf>,
     volume: f32,
     pcm_tx: mpsc::Sender<Vec<f32>>,
+    epoch_tx: watch::Sender<u64>,
 ) -> (Shared, mpsc::Sender<Command>) {
     let state = Arc::new(RwLock::new(PlayerState {
         status: Status::Playing,
@@ -94,9 +96,29 @@ pub fn spawn(
                             let mut s = task_state.write().expect("player state poisoned");
                             s.playlist_index = pl_idx;
                         }
+                        epoch_tx.send_modify(|e| *e += 1);
                         println!("switched playlist: {}", playlists[pl_idx].name);
                     }
                     Err(e) => eprintln!("cannot switch to {}: {e}", playlists[new_idx].name),
+                }
+            }
+
+            if let Some(pl) = playlists.get(pl_idx)
+                && pl.kind == "network_radio"
+            {
+                {
+                    let mut s = task_state.write().expect("player state poisoned");
+                    s.current_track = Some(pl.name.clone());
+                }
+                println!("now playing: radio {}", pl.name);
+                match crate::radio::run(&pl.path, &pcm_tx, &mut cmd_rx, playlists.len(), pl_idx)
+                    .await
+                {
+                    Some(new_idx) => {
+                        switch = Some(new_idx);
+                        continue;
+                    }
+                    None => return,
                 }
             }
 
@@ -116,37 +138,48 @@ pub fn spawn(
             }
             println!("now playing: {name}");
 
-            let decoded =
-                tokio::task::spawn_blocking(move || audio::decode_to_pcm(&path, 1.0)).await;
-            match decoded {
-                Ok(Ok(pcm)) => {
-                    for block in pcm.chunks(streamer::BLOCK_SIZE * 2) {
-                        while let Ok(cmd) = cmd_rx.try_recv() {
-                            if playlists.is_empty() {
-                                eprintln!("ignoring playlist switch: no playlists configured");
-                                continue;
-                            }
-                            let next = match cmd {
-                                Command::NextPlaylist => (pl_idx + 1) % playlists.len(),
-                                Command::PrevPlaylist => {
-                                    (pl_idx + playlists.len() - 1) % playlists.len()
-                                }
-                            };
-                            switch = Some(next);
-                        }
-                        if switch.is_some() {
-                            break;
-                        }
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("failed to open {name}: {e}");
+                    pos += 1;
+                    continue;
+                }
+            };
 
-                        let mut padded = block.to_vec();
-                        padded.resize(streamer::BLOCK_SIZE * 2, 0.0);
-                        if pcm_tx.send(padded).await.is_err() {
-                            return;
-                        }
+            let cancel = Arc::new(AtomicBool::new(false));
+            let pump_cancel = cancel.clone();
+            let pump_tx = pcm_tx.clone();
+            let mut handle = tokio::task::spawn_blocking(move || {
+                pump::pump(Box::new(file), &pump_tx, &pump_cancel, 0)
+            });
+
+            tokio::select! {
+                cmd = cmd_rx.recv() => {
+                    cancel.store(true, Ordering::Relaxed);
+                    let _ = handle.await;
+                    if playlists.is_empty() {
+                        eprintln!("ignoring playlist switch: no playlists configured");
+                    } else if let Some(c) = cmd {
+                        let next = match c {
+                            Command::NextPlaylist => (pl_idx + 1) % playlists.len(),
+                            Command::PrevPlaylist => {
+                                (pl_idx + playlists.len() - 1) % playlists.len()
+                            }
+                        };
+                        switch = Some(next);
                     }
                 }
-                Ok(Err(e)) => eprintln!("failed to decode {name}: {e}"),
-                Err(e) => eprintln!("decode task failed for {name}: {e}"),
+                result = &mut handle => {
+                    match result {
+                        Ok(pump::Outcome::Exhausted) => {}
+                        Ok(pump::Outcome::Interrupted) => {}
+                        Ok(pump::Outcome::Failed(e)) => {
+                            eprintln!("playback of {name} failed: {e}")
+                        }
+                        Err(e) => eprintln!("pump task panicked for {name}: {e}"),
+                    }
+                }
             }
 
             if switch.is_none() {

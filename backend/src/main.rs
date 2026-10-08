@@ -13,6 +13,8 @@ use tower_http::cors::CorsLayer;
 
 mod audio;
 mod player;
+mod pump;
+mod radio;
 mod streamer;
 
 use player::Playlist;
@@ -238,6 +240,7 @@ async fn main() {
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
 
     let queue = match config.playlists.get(config.current_playlist_index) {
+        Some(pl) if pl.kind == "network_radio" => Vec::new(),
         Some(pl) if pl.kind == "local_folder" => {
             match audio::scan_folder(std::path::Path::new(&pl.path)) {
                 Ok(files) if !files.is_empty() => files,
@@ -251,7 +254,11 @@ async fn main() {
                 }
             }
         }
-        _ => {
+        Some(pl) => {
+            eprintln!("unknown playlist type: {}", pl.kind);
+            std::process::exit(1);
+        }
+        None => {
             println!("no playlists configured, falling back to testdata/");
             match audio::scan_folder(std::path::Path::new("testdata")) {
                 Ok(files) if !files.is_empty() => files,
@@ -268,16 +275,18 @@ async fn main() {
     };
     println!("playlist: {} tracks", queue.len());
 
-    let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(600);
+    let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(128);
+    let (epoch_tx, epoch_rx) = tokio::sync::watch::channel(0u64);
     let (player_state, cmd_tx) = player::spawn(
         config.playlists.clone(),
         config.current_playlist_index,
         queue,
         config.volume,
         pcm_tx,
+        epoch_tx,
     );
 
-    let shared = match streamer::start_encoder(pcm_rx, player_state.clone()) {
+    let shared = match streamer::start_encoder(pcm_rx, player_state.clone(), epoch_rx) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("failed to start audio broadcast: {e}");
