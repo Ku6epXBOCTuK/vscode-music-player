@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 
 mod audio;
+mod player;
 mod streamer;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -68,7 +70,7 @@ fn load_or_create_config() -> Config {
 
 struct AppState {
     audio: Arc<streamer::SharedAudio>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -114,20 +116,22 @@ async fn stream_handler(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn shutdown_handler(State(state): State<Arc<AppState>>) -> StatusCode {
-    state.shutdown.notify_waiters();
+    state.shutdown.cancel();
     println!("shutdown requested via /api/shutdown");
     StatusCode::OK
 }
 
-async fn shutdown_signal(notify: Arc<Notify>) {
+async fn shutdown_signal(token: CancellationToken, quiet: bool) {
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
             if let Err(e) = result {
                 eprintln!("failed to listen for Ctrl+C: {e}");
             }
-            println!("shutdown requested via Ctrl+C");
+            if !quiet {
+                println!("shutdown requested via Ctrl+C");
+            }
         }
-        _ = notify.notified() => {}
+        _ = token.cancelled() => {}
     }
 }
 
@@ -170,15 +174,41 @@ async fn main() {
     let config = load_or_create_config();
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
 
-    let (pcm, boundaries) = match audio::decode_tracks(std::path::Path::new("testdata"), config.volume)
-    {
-        Ok(result) => result,
-        Err(e) => {
-            eprintln!("failed to decode testdata tracks: {e}");
-            std::process::exit(1);
+    let queue = match config.playlists.get(config.current_playlist_index) {
+        Some(pl) if pl.kind == "local_folder" => {
+            match audio::scan_folder(std::path::Path::new(&pl.path)) {
+                Ok(files) if !files.is_empty() => files,
+                Ok(_) => {
+                    eprintln!("playlist folder is empty: {}", pl.path);
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("failed to scan playlist folder {}: {e}", pl.path);
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            println!("no playlists configured, falling back to testdata/");
+            match audio::scan_folder(std::path::Path::new("testdata")) {
+                Ok(files) if !files.is_empty() => files,
+                Ok(_) => {
+                    eprintln!("no audio files in testdata/");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("failed to scan testdata/: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
     };
-    let shared = match streamer::start_broadcast(pcm, boundaries) {
+    println!("playlist: {} tracks", queue.len());
+
+    let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(600);
+    let player_state = player::spawn(queue, config.volume, pcm_tx);
+
+    let shared = match streamer::start_encoder(pcm_rx, player_state) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("failed to start audio broadcast: {e}");
@@ -186,7 +216,7 @@ async fn main() {
         }
     };
 
-    let shutdown = Arc::new(Notify::new());
+    let shutdown = CancellationToken::new();
     let state = Arc::new(AppState {
         audio: shared,
         shutdown: shutdown.clone(),
@@ -209,12 +239,18 @@ async fn main() {
     };
 
     println!("music-player backend listening on http://{addr}");
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown))
-        .await
-    {
-        eprintln!("server error: {e}");
-    }
+
+    let server_shutdown = shutdown.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal(server_shutdown, true))
+            .await
+    });
+
+    shutdown_signal(shutdown, false).await;
+
+    // stream clients (OBS, VLC) hold infinite connections; do not wait for them
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 
     let path = config_path();
     match serde_json::to_string_pretty(&config) {

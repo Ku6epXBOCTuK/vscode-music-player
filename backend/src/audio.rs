@@ -1,4 +1,4 @@
-use std::error::Error;
+﻿use std::error::Error;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +27,7 @@ struct RawPcm {
     channels: usize,
 }
 
-fn decode_raw(path: &Path) -> Result<RawPcm, Box<dyn Error>> {
+fn decode_raw(path: &Path) -> Result<RawPcm, Box<dyn Error + Send + Sync>> {
     let file = File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -89,7 +89,7 @@ fn decode_raw(path: &Path) -> Result<RawPcm, Box<dyn Error>> {
     })
 }
 
-pub fn decode_file(path: &Path) -> Result<DecodeStats, Box<dyn Error>> {
+pub fn decode_file(path: &Path) -> Result<DecodeStats, Box<dyn Error + Send + Sync>> {
     let raw = decode_raw(path)?;
     let total_frames = (raw.samples.len() / raw.channels.max(1)) as u64;
     let duration_secs = if raw.sample_rate > 0 {
@@ -134,7 +134,7 @@ fn interleave(left: &[f32], right: &[f32]) -> Vec<f32> {
     out
 }
 
-fn resample_to_target(left: Vec<f32>, right: Vec<f32>, in_rate: u32) -> Result<Vec<f32>, Box<dyn Error>> {
+fn resample_to_target(left: Vec<f32>, right: Vec<f32>, in_rate: u32) -> Result<Vec<f32>, Box<dyn Error + Send + Sync>> {
     if in_rate == TARGET_RATE {
         return Ok(interleave(&left, &right));
     }
@@ -165,7 +165,7 @@ fn resample_to_target(left: Vec<f32>, right: Vec<f32>, in_rate: u32) -> Result<V
     Ok(interleave(&out_left, &out_right))
 }
 
-pub fn decode_to_pcm(path: &Path, gain: f32) -> Result<Vec<f32>, Box<dyn Error>> {
+pub fn decode_to_pcm(path: &Path, gain: f32) -> Result<Vec<f32>, Box<dyn Error + Send + Sync>> {
     let raw = decode_raw(path)?;
     if raw.channels == 0 || raw.sample_rate == 0 {
         return Err("decoded file has no audio".into());
@@ -185,41 +185,28 @@ pub fn decode_to_pcm(path: &Path, gain: f32) -> Result<Vec<f32>, Box<dyn Error>>
 
 const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "flac", "wav", "aac", "m4a", "ogg"];
 
-// Returns interleaved 48 kHz stereo PCM for all audio files in `dir`
-// (sorted by name), plus per-track end positions in frames.
-pub fn decode_tracks(
-    dir: &Path,
-    gain: f32,
-) -> Result<(Vec<f32>, Vec<(String, usize)>), Box<dyn Error>> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
+// Recursively collects audio files under `dir`, sorted by path.
+pub fn scan_folder(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error + Send + Sync>> {
+    fn visit(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, out)?;
+            } else if path
+                .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
                 .unwrap_or(false)
-        })
-        .collect();
-    entries.sort();
-
-    if entries.is_empty() {
-        return Err(format!("no audio files found in {}", dir.display()).into());
+            {
+                out.push(path);
+            }
+        }
+        Ok(())
     }
 
-    let mut pcm: Vec<f32> = Vec::new();
-    let mut boundaries: Vec<(String, usize)> = Vec::new();
-    for path in entries {
-        let track = decode_to_pcm(&path, gain)?;
-        let secs = track.len() as f64 / 2.0 / TARGET_RATE as f64;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        println!("loaded track: {name} ({secs:.1} s)");
-        pcm.extend_from_slice(&track);
-        boundaries.push((name, pcm.len() / 2));
-    }
-
-    Ok((pcm, boundaries))
+    let mut files = Vec::new();
+    visit(dir, &mut files)?;
+    files.sort();
+    Ok(files)
 }

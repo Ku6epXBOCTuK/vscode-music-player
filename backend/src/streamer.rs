@@ -10,11 +10,12 @@ use flacenc::config::Encoder as EncoderConfig;
 use flacenc::encode_fixed_size_frame;
 use flacenc::error::Verify;
 use flacenc::source::{Fill, FrameBuf};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::audio;
+use crate::player::{self, Status};
 
-const BLOCK_SIZE: usize = 4096;
+pub const BLOCK_SIZE: usize = 4096;
 const BROADCAST_CAPACITY: usize = 512;
 const RECENT_CAPACITY: usize = 240;
 
@@ -24,19 +25,10 @@ pub struct SharedAudio {
     pub recent: Arc<RwLock<VecDeque<Bytes>>>,
 }
 
-pub fn start_broadcast(
-    pcm: Vec<f32>,
-    boundaries: Vec<(String, usize)>,
+pub fn start_encoder(
+    mut pcm_rx: mpsc::Receiver<Vec<f32>>,
+    player: player::Shared,
 ) -> Result<SharedAudio, Box<dyn Error>> {
-    let samples: Vec<i32> = pcm
-        .iter()
-        .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i32)
-        .collect();
-    let total_frames = samples.len() / 2;
-    if total_frames < BLOCK_SIZE {
-        return Err("audio is shorter than one FLAC block".into());
-    }
-
     let encoder_config = EncoderConfig::default()
         .into_verified()
         .map_err(|(_, e)| format!("invalid FLAC encoder config: {e}"))?;
@@ -69,7 +61,7 @@ pub fn start_broadcast(
             Duration::from_secs_f64(BLOCK_SIZE as f64 / audio::TARGET_RATE as f64);
         let mut next_deadline = tokio::time::Instant::now();
         let mut frame_number: usize = 0;
-        let mut current_track: Option<usize> = None;
+        let mut underruns: u64 = 0;
         let mut framebuf = match FrameBuf::with_size(2, BLOCK_SIZE) {
             Ok(fb) => fb,
             Err(e) => {
@@ -79,22 +71,41 @@ pub fn start_broadcast(
         };
 
         loop {
-            let start = (frame_number * BLOCK_SIZE) % total_frames;
-            let track_idx = boundaries.iter().position(|(_, end)| start < *end);
-            if track_idx != current_track {
-                current_track = track_idx;
-                if let Some(i) = track_idx {
-                    println!("now playing: {}", boundaries[i].0);
+            let (playing, volume) = {
+                let s = player.read().expect("player state poisoned");
+                (
+                    matches!(s.status, Status::Playing),
+                    s.volume,
+                )
+            };
+
+            let block: Vec<f32> = if playing {
+                match pcm_rx.try_recv() {
+                    Ok(b) => {
+                        if underruns > 0 {
+                            eprintln!("pcm recovered after {underruns} starved blocks");
+                            underruns = 0;
+                        }
+                        b
+                    }
+                    Err(_) => {
+                        underruns += 1;
+                        if underruns == 1 || underruns % 500 == 0 {
+                            eprintln!("pcm underrun: encoder starved ({underruns} blocks)");
+                        }
+                        vec![0.0; BLOCK_SIZE * 2]
+                    }
                 }
-            }
-            let mut block = Vec::with_capacity(BLOCK_SIZE * 2);
-            for f in 0..BLOCK_SIZE {
-                let idx = ((start + f) % total_frames) * 2;
-                block.push(samples[idx]);
-                block.push(samples[idx + 1]);
+            } else {
+                vec![0.0; BLOCK_SIZE * 2]
+            };
+
+            let mut ints = Vec::with_capacity(BLOCK_SIZE * 2);
+            for s in block {
+                ints.push((s.clamp(-1.0, 1.0) * volume * i16::MAX as f32) as i32);
             }
 
-            if let Err(e) = framebuf.fill_interleaved(&block) {
+            if let Err(e) = framebuf.fill_interleaved(&ints) {
                 eprintln!("failed to fill FLAC frame buffer: {e}");
                 return;
             }
