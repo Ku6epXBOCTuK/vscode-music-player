@@ -17,7 +17,10 @@ use crate::player::{self, Status};
 
 pub const BLOCK_SIZE: usize = 4096;
 const BROADCAST_CAPACITY: usize = 512;
-const RECENT_CAPACITY: usize = 240;
+// burst-on-connect: ~0.5 s of audio (BLOCK_SIZE = 85.3 ms per frame).
+// Clients are local (OBS/VLC on the same machine or LAN), so a small burst
+// keeps volume/track changes responsive. Increase for remote listeners.
+const RECENT_CAPACITY: usize = 6;
 
 pub struct SharedAudio {
     pub tx: broadcast::Sender<Bytes>,

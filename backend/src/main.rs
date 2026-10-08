@@ -15,13 +15,7 @@ mod audio;
 mod player;
 mod streamer;
 
-#[derive(Serialize, Deserialize, Clone)]
-struct Playlist {
-    name: String,
-    #[serde(rename = "type")]
-    kind: String,
-    path: String,
-}
+use player::Playlist;
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -70,6 +64,8 @@ fn load_or_create_config() -> Config {
 
 struct AppState {
     audio: Arc<streamer::SharedAudio>,
+    player: player::Shared,
+    cmd_tx: tokio::sync::mpsc::Sender<player::Command>,
     shutdown: CancellationToken,
 }
 
@@ -119,6 +115,73 @@ async fn shutdown_handler(State(state): State<Arc<AppState>>) -> StatusCode {
     state.shutdown.cancel();
     println!("shutdown requested via /api/shutdown");
     StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct ControlRequest {
+    action: String,
+}
+
+async fn control_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ControlRequest>,
+) -> StatusCode {
+    match req.action.as_str() {
+        "play" | "pause" | "stop" => {
+            let status = match req.action.as_str() {
+                "play" => player::Status::Playing,
+                "pause" => player::Status::Paused,
+                _ => player::Status::Stopped,
+            };
+            let mut s = state.player.write().expect("player state poisoned");
+            s.status = status;
+            println!("control: {status:?}");
+            StatusCode::OK
+        }
+        "next_playlist" | "prev_playlist" => {
+            let cmd = if req.action == "next_playlist" {
+                player::Command::NextPlaylist
+            } else {
+                player::Command::PrevPlaylist
+            };
+            match state.cmd_tx.try_send(cmd) {
+                Ok(()) => StatusCode::OK,
+                Err(e) => {
+                    eprintln!("failed to queue playlist switch: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }
+        }
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
+#[derive(Deserialize)]
+struct VolumeRequest {
+    volume: f32,
+}
+
+async fn volume_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<VolumeRequest>,
+) -> StatusCode {
+    if !(0.0..=1.0).contains(&req.volume) {
+        return StatusCode::BAD_REQUEST;
+    }
+    let mut s = state.player.write().expect("player state poisoned");
+    s.volume = req.volume;
+    println!("volume: {:.2}", req.volume);
+    StatusCode::OK
+}
+
+async fn now_playing_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let s = state.player.read().expect("player state poisoned");
+    Json(serde_json::json!({
+        "status": s.status.as_str(),
+        "track": s.current_track,
+        "volume": s.volume,
+        "playlist_index": s.playlist_index,
+    }))
 }
 
 async fn shutdown_signal(token: CancellationToken, quiet: bool) {
@@ -206,9 +269,15 @@ async fn main() {
     println!("playlist: {} tracks", queue.len());
 
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(600);
-    let player_state = player::spawn(queue, config.volume, pcm_tx);
+    let (player_state, cmd_tx) = player::spawn(
+        config.playlists.clone(),
+        config.current_playlist_index,
+        queue,
+        config.volume,
+        pcm_tx,
+    );
 
-    let shared = match streamer::start_encoder(pcm_rx, player_state) {
+    let shared = match streamer::start_encoder(pcm_rx, player_state.clone()) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("failed to start audio broadcast: {e}");
@@ -219,11 +288,16 @@ async fn main() {
     let shutdown = CancellationToken::new();
     let state = Arc::new(AppState {
         audio: shared,
+        player: player_state.clone(),
+        cmd_tx,
         shutdown: shutdown.clone(),
     });
 
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/control", post(control_handler))
+        .route("/api/volume", post(volume_handler))
+        .route("/api/now_playing", get(now_playing_handler))
         .route("/api/shutdown", post(shutdown_handler))
         .route("/stream", get(stream_handler))
         .layer(CorsLayer::permissive())
@@ -253,6 +327,12 @@ async fn main() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 
     let path = config_path();
+    let mut config = config;
+    {
+        let s = player_state.read().expect("player state poisoned");
+        config.volume = s.volume;
+        config.current_playlist_index = s.playlist_index;
+    }
     match serde_json::to_string_pretty(&config) {
         Ok(text) => {
             if let Err(e) = std::fs::write(&path, text) {
