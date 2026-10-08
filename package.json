@@ -1,0 +1,24 @@
+{
+	"name": "music-player",
+	"version": "0.1.0",
+	"description": "",
+	"main": "index.js",
+	"scripts": {
+		"format": "prettier --write . --log-level=warn"
+	},
+	"keywords": [],
+	"author": "Ku6epXBOCTuK",
+	"license": "MIT",
+	"devEngines": {
+		"packageManager": {
+			"name": "pnpm",
+			"version": "12.10.0",
+			"onFail": "download"
+		}
+	},
+	"packageManager": "pnpm@12.10.0",
+	"type": "module",
+	"dependencies": {
+		"prettier": "^3.9.9"
+	}
+}
