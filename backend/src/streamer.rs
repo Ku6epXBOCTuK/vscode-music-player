@@ -24,7 +24,10 @@ pub struct SharedAudio {
     pub recent: Arc<RwLock<VecDeque<Bytes>>>,
 }
 
-pub fn start_broadcast(pcm: Vec<f32>) -> Result<SharedAudio, Box<dyn Error>> {
+pub fn start_broadcast(
+    pcm: Vec<f32>,
+    boundaries: Vec<(String, usize)>,
+) -> Result<SharedAudio, Box<dyn Error>> {
     let samples: Vec<i32> = pcm
         .iter()
         .map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i32)
@@ -66,6 +69,7 @@ pub fn start_broadcast(pcm: Vec<f32>) -> Result<SharedAudio, Box<dyn Error>> {
             Duration::from_secs_f64(BLOCK_SIZE as f64 / audio::TARGET_RATE as f64);
         let mut next_deadline = tokio::time::Instant::now();
         let mut frame_number: usize = 0;
+        let mut current_track: Option<usize> = None;
         let mut framebuf = match FrameBuf::with_size(2, BLOCK_SIZE) {
             Ok(fb) => fb,
             Err(e) => {
@@ -76,6 +80,13 @@ pub fn start_broadcast(pcm: Vec<f32>) -> Result<SharedAudio, Box<dyn Error>> {
 
         loop {
             let start = (frame_number * BLOCK_SIZE) % total_frames;
+            let track_idx = boundaries.iter().position(|(_, end)| start < *end);
+            if track_idx != current_track {
+                current_track = track_idx;
+                if let Some(i) = track_idx {
+                    println!("now playing: {}", boundaries[i].0);
+                }
+            }
             let mut block = Vec::with_capacity(BLOCK_SIZE * 2);
             for f in 0..BLOCK_SIZE {
                 let idx = ((start + f) % total_frames) * 2;

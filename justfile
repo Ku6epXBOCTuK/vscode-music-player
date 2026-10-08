@@ -1,6 +1,7 @@
 # Run the backend (release build: debug FLAC encoding is too slow)
-backend:
-    cargo run --release --manifest-path backend/Cargo.toml
+# The recipe ignores the exit code: Ctrl+C interrupts just itself (exit 512)
+backend: backend-build
+    -./backend/target/release/backend.exe
 
 # Build the backend in release mode
 backend-build:

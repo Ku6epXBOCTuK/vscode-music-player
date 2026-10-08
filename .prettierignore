@@ -6,3 +6,4 @@ pnpm-lock.yaml
 static
 *.log
 .DS_Store
+backend

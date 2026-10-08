@@ -2,12 +2,12 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::Response;
-use axum::{routing::get, Json, Router};
+use axum::{routing::get, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tower_http::cors::CorsLayer;
 
 mod audio;
@@ -66,6 +66,11 @@ fn load_or_create_config() -> Config {
     }
 }
 
+struct AppState {
+    audio: Arc<streamer::SharedAudio>,
+    shutdown: Arc<Notify>,
+}
+
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
@@ -73,14 +78,14 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
-async fn stream_handler(State(state): State<Arc<streamer::SharedAudio>>) -> Response {
+async fn stream_handler(State(state): State<Arc<AppState>>) -> Response {
     let (mut rx, snapshot) = {
-        let recent = state.recent.read().expect("recent buffer poisoned");
-        let rx = state.tx.subscribe();
+        let recent = state.audio.recent.read().expect("recent buffer poisoned");
+        let rx = state.audio.tx.subscribe();
         let snapshot: Vec<bytes::Bytes> = recent.iter().cloned().collect();
         (rx, snapshot)
     };
-    let header_bytes = state.header.clone();
+    let header_bytes = state.audio.header.clone();
 
     let body = async_stream::stream! {
         yield Ok::<bytes::Bytes, std::io::Error>(header_bytes);
@@ -106,6 +111,24 @@ async fn stream_handler(State(state): State<Arc<streamer::SharedAudio>>) -> Resp
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(body))
         .expect("failed to build stream response")
+}
+
+async fn shutdown_handler(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.shutdown.notify_waiters();
+    println!("shutdown requested via /api/shutdown");
+    StatusCode::OK
+}
+
+async fn shutdown_signal(notify: Arc<Notify>) {
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(e) = result {
+                eprintln!("failed to listen for Ctrl+C: {e}");
+            }
+            println!("shutdown requested via Ctrl+C");
+        }
+        _ = notify.notified() => {}
+    }
 }
 
 #[tokio::main]
@@ -147,15 +170,15 @@ async fn main() {
     let config = load_or_create_config();
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
 
-    let pcm = match audio::decode_to_pcm(std::path::Path::new("testdata/sample.mp3"), config.volume)
+    let (pcm, boundaries) = match audio::decode_tracks(std::path::Path::new("testdata"), config.volume)
     {
-        Ok(pcm) => pcm,
+        Ok(result) => result,
         Err(e) => {
-            eprintln!("failed to decode testdata/sample.mp3: {e}");
+            eprintln!("failed to decode testdata tracks: {e}");
             std::process::exit(1);
         }
     };
-    let shared = match streamer::start_broadcast(pcm) {
+    let shared = match streamer::start_broadcast(pcm, boundaries) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("failed to start audio broadcast: {e}");
@@ -163,11 +186,18 @@ async fn main() {
         }
     };
 
+    let shutdown = Arc::new(Notify::new());
+    let state = Arc::new(AppState {
+        audio: shared,
+        shutdown: shutdown.clone(),
+    });
+
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/shutdown", post(shutdown_handler))
         .route("/stream", get(stream_handler))
         .layer(CorsLayer::permissive())
-        .with_state(shared);
+        .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -179,5 +209,21 @@ async fn main() {
     };
 
     println!("music-player backend listening on http://{addr}");
-    axum::serve(listener, app).await.expect("server error");
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown))
+        .await
+    {
+        eprintln!("server error: {e}");
+    }
+
+    let path = config_path();
+    match serde_json::to_string_pretty(&config) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&path, text) {
+                eprintln!("failed to save config to {}: {e}", path.display());
+            }
+        }
+        Err(e) => eprintln!("failed to serialize config: {e}"),
+    }
+    println!("shutdown complete");
 }
