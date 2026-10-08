@@ -1,12 +1,12 @@
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
-use axum::response::Response;
+use axum::response::{Html, Response};
 use axum::{routing::get, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
@@ -67,8 +67,32 @@ fn load_or_create_config() -> Config {
 struct AppState {
     audio: Arc<streamer::SharedAudio>,
     player: player::Shared,
+    playlists: player::SharedPlaylists,
+    port: u16,
     cmd_tx: tokio::sync::mpsc::Sender<player::Command>,
     shutdown: CancellationToken,
+}
+
+fn persist_config(port: u16, player: &player::Shared, playlists: &player::SharedPlaylists) {
+    let (volume, index) = {
+        let s = player.read().expect("player state poisoned");
+        (s.volume, s.playlist_index)
+    };
+    let config = Config {
+        current_playlist_index: index,
+        volume,
+        port,
+        playlists: playlists.read().expect("playlists poisoned").clone(),
+    };
+    let path = config_path();
+    match serde_json::to_string_pretty(&config) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&path, text) {
+                eprintln!("failed to save config to {}: {e}", path.display());
+            }
+        }
+        Err(e) => eprintln!("failed to serialize config: {e}"),
+    }
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -186,6 +210,63 @@ async fn now_playing_handler(State(state): State<Arc<AppState>>) -> Json<serde_j
     }))
 }
 
+async fn index_handler() -> Html<&'static str> {
+    Html(include_str!("../assets/index.html"))
+}
+
+async fn list_playlists_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let playlists = state.playlists.read().expect("playlists poisoned");
+    let current = state.player.read().expect("player state poisoned").playlist_index;
+    Json(serde_json::json!({
+        "current": current,
+        "playlists": *playlists,
+    }))
+}
+
+#[derive(Deserialize)]
+struct AddPlaylistRequest {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+    path: String,
+}
+
+async fn add_playlist_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddPlaylistRequest>,
+) -> StatusCode {
+    let name = req.name.trim();
+    let path = req.path.trim();
+    if name.is_empty() || path.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    match req.kind.as_str() {
+        "local_folder" => match audio::scan_folder(std::path::Path::new(path)) {
+            Ok(files) if !files.is_empty() => {}
+            _ => return StatusCode::BAD_REQUEST,
+        },
+        "network_radio" => {
+            if !(path.starts_with("http://") || path.starts_with("https://")) {
+                return StatusCode::BAD_REQUEST;
+            }
+        }
+        _ => return StatusCode::BAD_REQUEST,
+    }
+
+    {
+        let mut playlists = state.playlists.write().expect("playlists poisoned");
+        playlists.push(Playlist {
+            name: name.to_string(),
+            kind: req.kind,
+            path: path.to_string(),
+        });
+    }
+    println!("added playlist: {name} ({path})");
+    persist_config(state.port, &state.player, &state.playlists);
+    StatusCode::OK
+}
+
 async fn shutdown_signal(token: CancellationToken, quiet: bool) {
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
@@ -277,8 +358,10 @@ async fn main() {
 
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(128);
     let (epoch_tx, epoch_rx) = tokio::sync::watch::channel(0u64);
+    let playlists_shared: player::SharedPlaylists =
+        Arc::new(RwLock::new(config.playlists.clone()));
     let (player_state, cmd_tx) = player::spawn(
-        config.playlists.clone(),
+        playlists_shared.clone(),
         config.current_playlist_index,
         queue,
         config.volume,
@@ -298,15 +381,22 @@ async fn main() {
     let state = Arc::new(AppState {
         audio: shared,
         player: player_state.clone(),
+        playlists: playlists_shared.clone(),
+        port: config.port,
         cmd_tx,
         shutdown: shutdown.clone(),
     });
 
     let app = Router::new()
+        .route("/", get(index_handler))
         .route("/api/health", get(health))
         .route("/api/control", post(control_handler))
         .route("/api/volume", post(volume_handler))
         .route("/api/now_playing", get(now_playing_handler))
+        .route(
+            "/api/playlists",
+            get(list_playlists_handler).post(add_playlist_handler),
+        )
         .route("/api/shutdown", post(shutdown_handler))
         .route("/stream", get(stream_handler))
         .layer(CorsLayer::permissive())
@@ -342,6 +432,10 @@ async fn main() {
         config.volume = s.volume;
         config.current_playlist_index = s.playlist_index;
     }
+    config.playlists = playlists_shared
+        .read()
+        .expect("playlists poisoned")
+        .clone();
     match serde_json::to_string_pretty(&config) {
         Ok(text) => {
             if let Err(e) = std::fs::write(&path, text) {

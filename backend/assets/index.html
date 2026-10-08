@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>music-player settings</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #1a1b1e; color: #e4e4e7; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1rem; color: #a1a1aa; margin-top: 2rem; }
+  .card { background: #26272b; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  button, select, input { background: #3f3f46; color: #e4e4e7; border: 1px solid #52525b; border-radius: 6px; padding: 0.4rem 0.8rem; font-size: 0.9rem; }
+  button { cursor: pointer; } button:hover { background: #52525b; }
+  input { flex: 1; min-width: 120px; }
+  ul { list-style: none; padding: 0; }
+  li.playlist { padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 0.4rem; background: #2e2f34; }
+  li.playlist.current { outline: 2px solid #38bdf8; }
+  li .meta { color: #a1a1aa; font-size: 0.8rem; }
+  #status { font-size: 1.05rem; }
+  #vol { width: 140px; }
+  .error { color: #f87171; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<h1>music-player</h1>
+
+<div class="card">
+  <div id="status">loading...</div>
+  <div class="row" style="margin-top: 0.75rem">
+    <button onclick="control('play')">Play</button>
+    <button onclick="control('pause')">Pause</button>
+    <button onclick="control('prev_playlist')">&lt;&lt; Playlist</button>
+    <button onclick="control('next_playlist')">Playlist &gt;&gt;</button>
+    <input id="vol" type="range" min="0" max="100" onchange="setVolume(this.value)">
+  </div>
+</div>
+
+<h2>Playlists</h2>
+<ul id="playlists"></ul>
+
+<h2>Add playlist</h2>
+<div class="card">
+  <div class="row">
+    <input id="name" placeholder="Name">
+    <select id="kind">
+      <option value="local_folder">Local folder</option>
+      <option value="network_radio">Network radio</option>
+    </select>
+    <input id="path" placeholder="C:/Music or https://...">
+    <button onclick="addPlaylist()">Add</button>
+  </div>
+  <div id="add-error" class="error"></div>
+</div>
+
+<script>
+const api = (path, opts) => fetch(path, opts).then(r => r.ok ? r : Promise.reject(r.status));
+
+async function refresh() {
+  const data = await api('/api/playlists').then(r => r.json());
+  const ul = document.getElementById('playlists');
+  ul.innerHTML = '';
+  data.playlists.forEach((p, i) => {
+    const li = document.createElement('li');
+    li.className = 'playlist' + (i === data.current ? ' current' : '');
+    li.innerHTML = `<div>${p.name}</div><div class="meta">${p.type} &mdash; ${p.path}</div>`;
+    ul.appendChild(li);
+  });
+}
+
+async function tick() {
+  try {
+    const s = await api('/api/now_playing').then(r => r.json());
+    document.getElementById('status').textContent =
+      (s.status === 'playing' ? 'Playing: ' : s.status === 'paused' ? 'Paused: ' : 'Stopped: ') + (s.track || '-');
+    document.getElementById('vol').value = Math.round(s.volume * 100);
+  } catch (e) {
+    document.getElementById('status').textContent = 'backend offline';
+  }
+}
+
+function control(action) {
+  api('/api/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) })
+    .then(() => setTimeout(() => { tick(); refresh(); }, 300));
+}
+
+function setVolume(v) {
+  api('/api/volume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ volume: v / 100 }) });
+}
+
+async function addPlaylist() {
+  const err = document.getElementById('add-error');
+  err.textContent = '';
+  const body = {
+    name: document.getElementById('name').value.trim(),
+    type: document.getElementById('kind').value,
+    path: document.getElementById('path').value.trim(),
+  };
+  try {
+    await api('/api/playlists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    document.getElementById('name').value = '';
+    document.getElementById('path').value = '';
+    refresh();
+  } catch (e) {
+    err.textContent = 'failed to add playlist (check the path and type)';
+  }
+}
+
+refresh();
+tick();
+setInterval(tick, 2000);
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

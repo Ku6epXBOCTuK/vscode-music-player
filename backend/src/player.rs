@@ -45,6 +45,7 @@ pub struct PlayerState {
 }
 
 pub type Shared = Arc<RwLock<PlayerState>>;
+pub type SharedPlaylists = Arc<RwLock<Vec<Playlist>>>;
 
 fn build_queue(playlist: &Playlist) -> Result<Vec<PathBuf>, String> {
     match playlist.kind.as_str() {
@@ -63,7 +64,7 @@ fn build_queue(playlist: &Playlist) -> Result<Vec<PathBuf>, String> {
 }
 
 pub fn spawn(
-    playlists: Vec<Playlist>,
+    playlists: SharedPlaylists,
     start_index: usize,
     initial_queue: Vec<PathBuf>,
     volume: f32,
@@ -79,6 +80,7 @@ pub fn spawn(
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
 
     let task_state = state.clone();
+    let task_playlists = playlists.clone();
     tokio::spawn(async move {
         let mut queue = initial_queue;
         let mut pl_idx = start_index;
@@ -86,9 +88,12 @@ pub fn spawn(
         let mut switch: Option<usize> = None;
 
         loop {
+            // snapshot: additions via POST /api/playlists apply on the next iteration
+            let playlists = task_playlists.read().expect("playlists poisoned").clone();
+
             if let Some(new_idx) = switch.take() {
-                match build_queue(&playlists[new_idx]) {
-                    Ok(q) => {
+                match playlists.get(new_idx).map(build_queue) {
+                    Some(Ok(q)) => {
                         queue = q;
                         pl_idx = new_idx;
                         pos = 0;
@@ -99,7 +104,10 @@ pub fn spawn(
                         epoch_tx.send_modify(|e| *e += 1);
                         println!("switched playlist: {}", playlists[pl_idx].name);
                     }
-                    Err(e) => eprintln!("cannot switch to {}: {e}", playlists[new_idx].name),
+                    Some(Err(e)) => {
+                        eprintln!("cannot switch to {}: {e}", playlists[new_idx].name)
+                    }
+                    None => eprintln!("playlist index {new_idx} no longer exists"),
                 }
             }
 
