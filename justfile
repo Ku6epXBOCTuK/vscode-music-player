@@ -61,4 +61,5 @@ ext-build:
 
 # Package the extension into a .vsix file
 ext-package: ext-build
+    Copy-Item LICENSE extension/LICENSE -Force
     pnpm --filter ./extension exec vsce package

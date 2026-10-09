@@ -2,10 +2,14 @@
 	"name": "music-player-extension",
 	"displayName": "Music Player",
 	"description": "Control the local music-player backend from the status bar",
-	"version": "0.1.0",
+	"version": "0.0.1",
 	"publisher": "Ku6epXBOCTuK",
 	"author": "Ku6epXBOCTuK",
 	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Ku6epXBOCTuK/vscode-music-player"
+	},
 	"engines": {
 		"vscode": "^1.90.0"
 	},

@@ -1,6 +1,6 @@
 [package]
 name = "backend"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 authors = ["Ku6epXBOCTuK"]
 license = "MIT"
@@ -20,6 +20,8 @@ futures-util = "0.3"
 flacenc = "0.5"
 async-stream = "0.3"
 bytes = "1"
+
+[target.'cfg(windows)'.dependencies]
 tray-icon = "0.21"
 windows = { version = "0.61", features = [
     "Win32_System_Console",
