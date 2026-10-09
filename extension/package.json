@@ -3,7 +3,9 @@
 	"displayName": "Music Player",
 	"description": "Control the local music-player backend from the status bar",
 	"version": "0.1.0",
-	"publisher": "local",
+	"publisher": "Ku6epXBOCTuK",
+	"author": "Ku6epXBOCTuK",
+	"license": "MIT",
 	"engines": {
 		"vscode": "^1.90.0"
 	},

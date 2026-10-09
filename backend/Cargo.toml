@@ -2,6 +2,9 @@
 name = "backend"
 version = "0.1.0"
 edition = "2024"
+authors = ["Ku6epXBOCTuK"]
+license = "MIT"
+description = "Local music player backend: playlists and internet radio to a FLAC HTTP stream for OBS"
 
 [dependencies]
 axum = "0.8"
