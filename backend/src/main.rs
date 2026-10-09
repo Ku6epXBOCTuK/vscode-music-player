@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
@@ -16,8 +18,23 @@ mod player;
 mod pump;
 mod radio;
 mod streamer;
+mod tray;
 
 use player::Playlist;
+
+#[cfg(target_os = "windows")]
+fn attach_parent_console() {
+    // the binary is built with windows_subsystem (no console window), but
+    // when started from a terminal we still want log output there
+    unsafe {
+        let _ = windows::Win32::System::Console::AttachConsole(
+            windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn attach_parent_console() {}
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -283,6 +300,8 @@ async fn shutdown_signal(token: CancellationToken, quiet: bool) {
 
 #[tokio::main]
 async fn main() {
+    attach_parent_console();
+
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("decode") {
         let path = PathBuf::from(
@@ -386,6 +405,8 @@ async fn main() {
         cmd_tx,
         shutdown: shutdown.clone(),
     });
+
+    tray::run(config.port, player_state.clone(), shutdown.clone());
 
     let app = Router::new()
         .route("/", get(index_handler))

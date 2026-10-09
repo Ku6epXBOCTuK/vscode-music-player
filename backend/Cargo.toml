@@ -17,3 +17,10 @@ futures-util = "0.3"
 flacenc = "0.5"
 async-stream = "0.3"
 bytes = "1"
+tray-icon = "0.21"
+windows = { version = "0.61", features = [
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Foundation",
+] }
