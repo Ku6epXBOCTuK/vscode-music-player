@@ -41,3 +41,11 @@ check-stream SECONDS="10":
     -curl -s -o testdata/stream-check.flac --max-time {{SECONDS}} http://127.0.0.1:3000/stream
     ffmpeg -v error -i testdata/stream-check.flac -f null -
     @echo stream-check OK, capture kept at testdata/stream-check.flac
+
+# Install workspace dependencies (root + extension)
+ext-setup:
+    pnpm install
+
+# Build the VS Code extension
+ext-build:
+    pnpm --filter ./extension run compile

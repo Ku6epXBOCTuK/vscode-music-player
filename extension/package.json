@@ -1,0 +1,59 @@
+{
+	"name": "music-player-extension",
+	"displayName": "Music Player",
+	"description": "Control the local music-player backend from the status bar",
+	"version": "0.1.0",
+	"publisher": "local",
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./dist/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "music-player.toggle",
+				"title": "Music Player: Play/Pause"
+			},
+			{
+				"command": "music-player.nextPlaylist",
+				"title": "Music Player: Next Playlist"
+			},
+			{
+				"command": "music-player.prevPlaylist",
+				"title": "Music Player: Previous Playlist"
+			},
+			{
+				"command": "music-player.setVolume",
+				"title": "Music Player: Set Volume"
+			},
+			{
+				"command": "music-player.volumeUp",
+				"title": "Music Player: Volume Up"
+			},
+			{
+				"command": "music-player.volumeDown",
+				"title": "Music Player: Volume Down"
+			},
+			{
+				"command": "music-player.openSettings",
+				"title": "Music Player: Open Settings"
+			}
+		]
+	},
+	"scripts": {
+		"compile": "node esbuild.js --production",
+		"watch": "node esbuild.js --watch"
+	},
+	"devDependencies": {
+		"@types/node": "^20",
+		"@types/vscode": "^1.90.0",
+		"esbuild": "^0.24.0",
+		"typescript": "^5.6.0"
+	}
+}
