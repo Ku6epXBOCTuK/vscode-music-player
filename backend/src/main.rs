@@ -346,17 +346,17 @@ async fn main() {
                 Ok(files) if !files.is_empty() => files,
                 Ok(_) => {
                     eprintln!("playlist folder is empty: {}", pl.path);
-                    std::process::exit(1);
+                    Vec::new()
                 }
                 Err(e) => {
                     eprintln!("failed to scan playlist folder {}: {e}", pl.path);
-                    std::process::exit(1);
+                    Vec::new()
                 }
             }
         }
         Some(pl) => {
             eprintln!("unknown playlist type: {}", pl.kind);
-            std::process::exit(1);
+            Vec::new()
         }
         None => {
             println!("no playlists configured, falling back to testdata/");
@@ -364,15 +364,18 @@ async fn main() {
                 Ok(files) if !files.is_empty() => files,
                 Ok(_) => {
                     eprintln!("no audio files in testdata/");
-                    std::process::exit(1);
+                    Vec::new()
                 }
                 Err(e) => {
                     eprintln!("failed to scan testdata/: {e}");
-                    std::process::exit(1);
+                    Vec::new()
                 }
             }
         }
     };
+    if queue.is_empty() {
+        println!("queue is empty: waiting for playlists to be added via the settings page");
+    }
     println!("playlist: {} tracks", queue.len());
 
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(128);

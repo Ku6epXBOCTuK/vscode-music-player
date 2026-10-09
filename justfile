@@ -1,3 +1,5 @@
+set windows-shell := ["powershell", "-NoProfile", "-Command"]
+
 # Show available recipes
 default:
     @just --list
@@ -6,6 +8,13 @@ default:
 # The recipe ignores the exit code: Ctrl+C interrupts just itself (exit 512)
 backend: backend-build
     -./backend/target/release/backend.exe
+
+# Install the release backend to ~/bin/vscode-music-player
+# (config.json is created there on first run with default settings)
+install: backend-build
+    New-Item -ItemType Directory -Force "$HOME/bin/vscode-music-player" | Out-Null
+    Copy-Item backend/target/release/backend.exe "$HOME/bin/vscode-music-player/backend.exe" -Force
+    @echo installed to $HOME/bin/vscode-music-player
 
 # Build the backend in release mode
 backend-build:
