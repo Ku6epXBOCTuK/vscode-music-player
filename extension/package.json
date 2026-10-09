@@ -15,6 +15,21 @@
 	],
 	"main": "./dist/extension.js",
 	"contributes": {
+		"configuration": {
+			"title": "Music Player",
+			"properties": {
+				"music-player.port": {
+					"type": "number",
+					"default": 3000,
+					"description": "Port of the music server API"
+				},
+				"music-player.backendPath": {
+					"type": "string",
+					"default": "",
+					"description": "Absolute path to the music server executable. Empty = auto-detect in the workspace or next to the extension."
+				}
+			}
+		},
 		"commands": [
 			{
 				"command": "music-player.toggle",
@@ -43,6 +58,10 @@
 			{
 				"command": "music-player.openSettings",
 				"title": "Music Player: Open Settings"
+			},
+			{
+				"command": "music-player.stopBackend",
+				"title": "Music Player: Stop Music Server"
 			}
 		]
 	},
