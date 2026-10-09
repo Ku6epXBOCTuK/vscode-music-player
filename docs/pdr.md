@@ -52,7 +52,7 @@ API / Chunked Stream).
 
 ## 3. Спецификация API
 
-Бэкенд поднимает HTTP-сервер на `http://localhost:3000`.
+Бэкенд поднимает HTTP-сервер на `http://localhost:45880`.
 
 ### 3.1. Управление (VS Code и браузер)
 
@@ -116,7 +116,7 @@ API / Chunked Stream).
 {
   "current_playlist_index": 0,
   "volume": 0.8,
-  "port": 3000,
+  "port": 45880,
   "playlists": [
     {
       "name": "Локальный Lo-Fi",
@@ -175,7 +175,7 @@ FLAC-кодирование дешевое, узкое место — ресем
 
 - Инициализация проекта (`cargo new`).
 - Пайплайн «один MP3-файл по кругу → PCM → FLAC → `/stream`».
-- **Критический эксперимент**: подключить `http://localhost:3000/stream` в OBS
+- **Критический эксперимент**: подключить `http://localhost:45880/stream` в OBS
   Studio как Media Source и проверить, что OBS декодирует FLAC-over-HTTP. Если
   нет — fallback: PCM/WAV-стрим (`Content-Type: audio/wav`) или переезд на
   Icecast-совместимый протокол.

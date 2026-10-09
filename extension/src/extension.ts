@@ -24,7 +24,7 @@ function log(message: string): void {
 function baseUrl(): string {
 	const port = vscode.workspace
 		.getConfiguration("music-player")
-		.get<number>("port", 3000);
+		.get<number>("port", 45880);
 	return `http://127.0.0.1:${port}`;
 }
 

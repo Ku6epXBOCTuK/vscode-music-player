@@ -1,4 +1,7 @@
+src
 node_modules
-dist
-.vscode-test
-*.vsix
+esbuild.js
+tsconfig.json
+.gitignore
+music-player.log
+*.map

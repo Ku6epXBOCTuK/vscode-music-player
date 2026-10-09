@@ -49,7 +49,7 @@ impl Default for Config {
         Self {
             current_playlist_index: 0,
             volume: 0.8,
-            port: 3000,
+            port: 45880,
             playlists: Vec::new(),
         }
     }

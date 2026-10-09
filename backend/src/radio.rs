@@ -77,17 +77,21 @@ pub async fn run(
     pl_idx: usize,
 ) -> Option<usize> {
     loop {
+        let attempt = {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+        };
         let response = match reqwest::get(url).await {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
-                eprintln!("radio: station returned HTTP {}", r.status());
+                eprintln!("radio: station returned HTTP {} (attempt {attempt})", r.status());
                 if let Some(next) = wait_or_switch(cmd_rx, playlist_count, pl_idx, 5).await {
                     return Some(next);
                 }
                 continue;
             }
             Err(e) => {
-                eprintln!("radio: connection failed: {e}");
+                eprintln!("radio: connection failed (attempt {attempt}): {e}");
                 if let Some(next) = wait_or_switch(cmd_rx, playlist_count, pl_idx, 5).await {
                     return Some(next);
                 }

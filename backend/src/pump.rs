@@ -64,6 +64,8 @@ pub fn pump(
     let mut out: VecDeque<f32> = VecDeque::new();
     let mut prebuffer: Vec<Vec<f32>> = Vec::with_capacity(prebuffer_blocks);
     let mut prebuffering = prebuffer_blocks > 0;
+    let started = std::time::Instant::now();
+    let mut blocks_sent: u64 = 0;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -72,7 +74,13 @@ pub fn pump(
 
         let packet = match format.next_packet() {
             Ok(p) => p,
-            Err(SymphoniaError::IoError(_)) => return Outcome::Exhausted,
+            Err(SymphoniaError::IoError(_)) => {
+                println!(
+                    "source exhausted after {blocks_sent} blocks ({:.1}s of audio pumped)",
+                    started.elapsed().as_secs_f64()
+                );
+                return Outcome::Exhausted;
+            }
             Err(e) => return Outcome::Failed(format!("demux failed: {e}")),
         };
         if packet.track_id() != track_id {
@@ -160,6 +168,7 @@ pub fn pump(
             if !send_block(pcm_tx, block, cancel) {
                 return finish(cancel);
             }
+            blocks_sent += 1;
         }
     }
 }

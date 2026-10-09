@@ -206,7 +206,14 @@ pub fn scan_folder(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error + Send + Sy
     }
 
     let mut files = Vec::new();
+    let started = std::time::Instant::now();
     visit(dir, &mut files)?;
     files.sort();
+    println!(
+        "scanned {}: {} audio files in {:.1}s",
+        dir.display(),
+        files.len(),
+        started.elapsed().as_secs_f64()
+    );
     Ok(files)
 }
