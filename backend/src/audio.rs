@@ -29,6 +29,7 @@ struct RawPcm {
 
 fn decode_raw(path: &Path) -> Result<RawPcm, Box<dyn Error + Send + Sync>> {
     let file = File::open(path)?;
+    log_debug!("decoding {}", path.display());
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
@@ -57,7 +58,10 @@ fn decode_raw(path: &Path) -> Result<RawPcm, Box<dyn Error + Send + Sync>> {
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(SymphoniaError::IoError(_)) => break,
-            Err(e) => return Err(Box::new(e)),
+            Err(e) => {
+                log_error!("demux failed for {}: {e}", path.display());
+                return Err(Box::new(e));
+            }
         };
 
         if packet.track_id() != track_id {
@@ -67,10 +71,13 @@ fn decode_raw(path: &Path) -> Result<RawPcm, Box<dyn Error + Send + Sync>> {
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
             Err(SymphoniaError::DecodeError(e)) => {
-                eprintln!("skipping corrupted packet: {e}");
+                log_warn!("skipping corrupted packet in {}: {e}", path.display());
                 continue;
             }
-            Err(e) => return Err(Box::new(e)),
+            Err(e) => {
+                log_error!("decode failed for {}: {e}", path.display());
+                return Err(Box::new(e));
+            }
         };
 
         let spec = *decoded.spec();
@@ -207,9 +214,15 @@ pub fn scan_folder(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error + Send + Sy
 
     let mut files = Vec::new();
     let started = std::time::Instant::now();
-    visit(dir, &mut files)?;
+    match visit(dir, &mut files) {
+        Ok(()) => {}
+        Err(e) => {
+            log_error!("failed to scan {}: {e}", dir.display());
+            return Err(Box::new(e));
+        }
+    }
     files.sort();
-    println!(
+    log_info!(
         "scanned {}: {} audio files in {:.1}s",
         dir.display(),
         files.len(),

@@ -1,2 +1,6 @@
 testdata/
 extension/*.vsix
+
+# backend log file, written next to the binary
+music-player.log
+music-player.log.1

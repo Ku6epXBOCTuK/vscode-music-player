@@ -13,6 +13,8 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 
+#[macro_use]
+mod log;
 mod audio;
 mod player;
 mod pump;
@@ -67,15 +69,23 @@ fn config_path() -> PathBuf {
 fn load_or_create_config() -> Config {
     let path = config_path();
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("config.json is corrupted ({e}), falling back to defaults");
-            Config::default()
-        }),
-        Err(_) => {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(config) => {
+                log_info!("loaded config: {}", path.display());
+                config
+            }
+            Err(e) => {
+                log_error!("config.json is corrupted ({e}), falling back to defaults");
+                Config::default()
+            }
+        },
+        Err(e) => {
+            log_info!("no config at {} ({e}), creating defaults", path.display());
             let config = Config::default();
             let text = serde_json::to_string_pretty(&config).expect("cannot serialize config");
-            std::fs::write(&path, text).expect("cannot write config.json");
-            println!("created default config: {}", path.display());
+            if let Err(e) = std::fs::write(&path, text) {
+                log_error!("cannot write config.json: {e}");
+            }
             config
         }
     }
@@ -105,10 +115,12 @@ fn persist_config(port: u16, player: &player::Shared, playlists: &player::Shared
     match serde_json::to_string_pretty(&config) {
         Ok(text) => {
             if let Err(e) = std::fs::write(&path, text) {
-                eprintln!("failed to save config to {}: {e}", path.display());
+                log_error!("failed to save config to {}: {e}", path.display());
+            } else {
+                log_debug!("config saved to {}", path.display());
             }
         }
-        Err(e) => eprintln!("failed to serialize config: {e}"),
+        Err(e) => log_error!("failed to serialize config: {e}"),
     }
 }
 
@@ -120,6 +132,10 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn stream_handler(State(state): State<Arc<AppState>>) -> Response {
+    log_info!(
+        "stream client connected (total subscribers: {})",
+        state.audio.tx.receiver_count()
+    );
     let (mut rx, snapshot) = {
         let recent = state.audio.recent.read().expect("recent buffer poisoned");
         let rx = state.audio.tx.subscribe();
@@ -137,12 +153,13 @@ async fn stream_handler(State(state): State<Arc<AppState>>) -> Response {
             match rx.recv().await {
                 Ok(chunk) => yield Ok(chunk),
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!("stream client lagged by {n} chunks");
+                    log_warn!("stream client lagged by {n} chunks");
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
+        log_info!("stream client disconnected");
     };
 
     Response::builder()
@@ -155,8 +172,8 @@ async fn stream_handler(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn shutdown_handler(State(state): State<Arc<AppState>>) -> StatusCode {
+    log_info!("shutdown requested via /api/shutdown");
     state.shutdown.cancel();
-    println!("shutdown requested via /api/shutdown");
     StatusCode::OK
 }
 
@@ -178,7 +195,7 @@ async fn control_handler(
             };
             let mut s = state.player.write().expect("player state poisoned");
             s.status = status;
-            println!("control: {status:?}");
+            log_info!("control: {}", status.as_str());
             StatusCode::OK
         }
         "next_playlist" | "prev_playlist" => {
@@ -188,14 +205,20 @@ async fn control_handler(
                 player::Command::PrevPlaylist
             };
             match state.cmd_tx.try_send(cmd) {
-                Ok(()) => StatusCode::OK,
+                Ok(()) => {
+                    log_info!("control: {}", req.action);
+                    StatusCode::OK
+                }
                 Err(e) => {
-                    eprintln!("failed to queue playlist switch: {e}");
+                    log_error!("failed to queue playlist switch: {e}");
                     StatusCode::INTERNAL_SERVER_ERROR
                 }
             }
         }
-        _ => StatusCode::BAD_REQUEST,
+        other => {
+            log_warn!("control: unknown action '{other}'");
+            StatusCode::BAD_REQUEST
+        }
     }
 }
 
@@ -209,11 +232,12 @@ async fn volume_handler(
     Json(req): Json<VolumeRequest>,
 ) -> StatusCode {
     if !(0.0..=1.0).contains(&req.volume) {
+        log_warn!("volume rejected: {} is out of range", req.volume);
         return StatusCode::BAD_REQUEST;
     }
     let mut s = state.player.write().expect("player state poisoned");
     s.volume = req.volume;
-    println!("volume: {:.2}", req.volume);
+    log_info!("volume: {:.2}", req.volume);
     StatusCode::OK
 }
 
@@ -255,20 +279,38 @@ async fn add_playlist_handler(
     let name = req.name.trim();
     let path = req.path.trim();
     if name.is_empty() || path.is_empty() {
+        log_warn!("add playlist rejected: empty name or path");
         return StatusCode::BAD_REQUEST;
     }
 
     match req.kind.as_str() {
         "local_folder" => match audio::scan_folder(std::path::Path::new(path)) {
-            Ok(files) if !files.is_empty() => {}
-            _ => return StatusCode::BAD_REQUEST,
+            Ok(files) if !files.is_empty() => {
+                log_info!(
+                    "add playlist: validated local folder '{}' ({} files)",
+                    path,
+                    files.len()
+                );
+            }
+            Ok(_) => {
+                log_warn!("add playlist rejected: no audio files in '{path}'");
+                return StatusCode::BAD_REQUEST;
+            }
+            Err(e) => {
+                log_error!("add playlist rejected: cannot scan '{path}': {e}");
+                return StatusCode::BAD_REQUEST;
+            }
         },
         "network_radio" => {
             if !(path.starts_with("http://") || path.starts_with("https://")) {
+                log_warn!("add playlist rejected: '{path}' is not an http(s) URL");
                 return StatusCode::BAD_REQUEST;
             }
         }
-        _ => return StatusCode::BAD_REQUEST,
+        other => {
+            log_warn!("add playlist rejected: unknown type '{other}'");
+            return StatusCode::BAD_REQUEST;
+        }
     }
 
     {
@@ -278,8 +320,13 @@ async fn add_playlist_handler(
             kind: req.kind,
             path: path.to_string(),
         });
+        log_info!(
+            "added playlist '{}' at index {} (total playlists: {})",
+            name,
+            playlists.len() - 1,
+            playlists.len()
+        );
     }
-    println!("added playlist: {name} ({path})");
     persist_config(state.port, &state.player, &state.playlists);
     StatusCode::OK
 }
@@ -288,10 +335,10 @@ async fn shutdown_signal(token: CancellationToken, quiet: bool) {
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
             if let Err(e) = result {
-                eprintln!("failed to listen for Ctrl+C: {e}");
+                log_error!("failed to listen for Ctrl+C: {e}");
             }
             if !quiet {
-                println!("shutdown requested via Ctrl+C");
+                log_info!("shutdown requested via Ctrl+C");
             }
         }
         _ = token.cancelled() => {}
@@ -301,6 +348,15 @@ async fn shutdown_signal(token: CancellationToken, quiet: bool) {
 #[tokio::main]
 async fn main() {
     attach_parent_console();
+    log::init();
+    log_info!(
+        "music-player backend v{} starting (pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
+    if let Ok(exe) = std::env::current_exe() {
+        log_debug!("executable: {}", exe.display());
+    }
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("decode") {
@@ -316,7 +372,7 @@ async fn main() {
                 println!("  duration:    {:.2} s", stats.duration_secs);
             }
             Err(e) => {
-                eprintln!("decode failed for {}: {e}", path.display());
+                log_error!("decode failed for {}: {e}", path.display());
                 std::process::exit(1);
             }
         }
@@ -329,7 +385,7 @@ async fn main() {
                 );
             }
             Err(e) => {
-                eprintln!("resample failed for {}: {e}", path.display());
+                log_error!("resample failed for {}: {e}", path.display());
                 std::process::exit(1);
             }
         }
@@ -337,46 +393,81 @@ async fn main() {
     }
 
     let config = load_or_create_config();
+    log_info!(
+        "config: port {}, volume {:.2}, {} playlist(s), start index {}",
+        config.port,
+        config.volume,
+        config.playlists.len(),
+        config.current_playlist_index
+    );
+    for (i, pl) in config.playlists.iter().enumerate() {
+        log_debug!(
+            "  playlist[{}] '{}' ({}) -> {}",
+            i,
+            pl.name,
+            pl.kind,
+            pl.path
+        );
+    }
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
 
     let queue = match config.playlists.get(config.current_playlist_index) {
-        Some(pl) if pl.kind == "network_radio" => Vec::new(),
+        Some(pl) if pl.kind == "network_radio" => {
+            log_info!(
+                "start playlist[{}] '{}' is a radio station: {}",
+                config.current_playlist_index,
+                pl.name,
+                pl.path
+            );
+            Vec::new()
+        }
         Some(pl) if pl.kind == "local_folder" => {
+            log_info!(
+                "start playlist[{}] '{}' local folder: {}",
+                config.current_playlist_index,
+                pl.name,
+                pl.path
+            );
             match audio::scan_folder(std::path::Path::new(&pl.path)) {
                 Ok(files) if !files.is_empty() => files,
                 Ok(_) => {
-                    eprintln!("playlist folder is empty: {}", pl.path);
+                    log_error!("playlist folder is empty: {}", pl.path);
                     Vec::new()
                 }
                 Err(e) => {
-                    eprintln!("failed to scan playlist folder {}: {e}", pl.path);
+                    log_error!("failed to scan playlist folder {}: {e}", pl.path);
                     Vec::new()
                 }
             }
         }
         Some(pl) => {
-            eprintln!("unknown playlist type: {}", pl.kind);
+            log_error!(
+                "unknown playlist type '{}' for playlist[{}] '{}'",
+                pl.kind,
+                config.current_playlist_index,
+                pl.name
+            );
             Vec::new()
         }
         None => {
-            println!("no playlists configured, falling back to testdata/");
+            log_warn!("no playlists configured, falling back to testdata/");
             match audio::scan_folder(std::path::Path::new("testdata")) {
                 Ok(files) if !files.is_empty() => files,
                 Ok(_) => {
-                    eprintln!("no audio files in testdata/");
+                    log_error!("no audio files in testdata/");
                     Vec::new()
                 }
                 Err(e) => {
-                    eprintln!("failed to scan testdata/: {e}");
+                    log_error!("failed to scan testdata/: {e}");
                     Vec::new()
                 }
             }
         }
     };
     if queue.is_empty() {
-        println!("queue is empty: waiting for playlists to be added via the settings page");
+        log_warn!("queue is empty: waiting for playlists to be added via the settings page");
     }
-    println!("playlist: {} tracks", queue.len());
+    log_info!("initial queue: {} tracks", queue.len());
 
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(128);
     let (epoch_tx, epoch_rx) = tokio::sync::watch::channel(0u64);
@@ -392,9 +483,12 @@ async fn main() {
     );
 
     let shared = match streamer::start_encoder(pcm_rx, player_state.clone(), epoch_rx) {
-        Ok(s) => Arc::new(s),
+        Ok(s) => {
+            log_info!("FLAC encoder started (48000 Hz stereo)");
+            Arc::new(s)
+        }
         Err(e) => {
-            eprintln!("failed to start audio broadcast: {e}");
+            log_error!("failed to start audio broadcast: {e}");
             std::process::exit(1);
         }
     };
@@ -410,6 +504,7 @@ async fn main() {
     });
 
     tray::run(config.port, player_state.clone(), shutdown.clone());
+    log_debug!("tray icon initialized");
 
     let app = Router::new()
         .route("/", get(index_handler))
@@ -429,13 +524,16 @@ async fn main() {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("failed to bind port {}: {e}", config.port);
-            eprintln!("the backend may already be running, or another app is using this port");
+            log_error!("failed to bind port {}: {e}", config.port);
+            log_error!("the backend may already be running, or another app is using this port");
             std::process::exit(1);
         }
     };
 
-    println!("music-player backend listening on http://{addr}");
+    log_info!("music-player backend listening on http://{addr}");
+    log_debug!(
+        "routes: / /api/health /api/control /api/volume /api/now_playing /api/playlists /api/shutdown /stream"
+    );
 
     let server_shutdown = shutdown.clone();
     let server = tokio::spawn(async move {
@@ -445,6 +543,7 @@ async fn main() {
     });
 
     shutdown_signal(shutdown, false).await;
+    log_info!("shutting down");
 
     // stream clients (OBS, VLC) hold infinite connections; do not wait for them
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
@@ -463,10 +562,12 @@ async fn main() {
     match serde_json::to_string_pretty(&config) {
         Ok(text) => {
             if let Err(e) = std::fs::write(&path, text) {
-                eprintln!("failed to save config to {}: {e}", path.display());
+                log_error!("failed to save config to {}: {e}", path.display());
+            } else {
+                log_debug!("final config saved to {}", path.display());
             }
         }
-        Err(e) => eprintln!("failed to serialize config: {e}"),
+        Err(e) => log_error!("failed to serialize config: {e}"),
     }
-    println!("shutdown complete");
+    log_info!("shutdown complete");
 }

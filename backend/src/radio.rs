@@ -84,14 +84,17 @@ pub async fn run(
         let response = match reqwest::get(url).await {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
-                eprintln!("radio: station returned HTTP {} (attempt {attempt})", r.status());
+                log_error!(
+                    "radio: station returned HTTP {} (attempt {attempt})",
+                    r.status()
+                );
                 if let Some(next) = wait_or_switch(cmd_rx, playlist_count, pl_idx, 5).await {
                     return Some(next);
                 }
                 continue;
             }
             Err(e) => {
-                eprintln!("radio: connection failed (attempt {attempt}): {e}");
+                log_error!("radio: connection failed (attempt {attempt}): {e}");
                 if let Some(next) = wait_or_switch(cmd_rx, playlist_count, pl_idx, 5).await {
                     return Some(next);
                 }
@@ -99,7 +102,7 @@ pub async fn run(
             }
         };
 
-        println!("radio: connected to {url}");
+        log_info!("radio: connected to {url} (attempt {attempt})");
         let (byte_tx, byte_rx) = mpsc::channel::<Bytes>(128);
         let reader = ChannelReader {
             rx: std::sync::Mutex::new(byte_rx),
@@ -114,9 +117,11 @@ pub async fn run(
         });
 
         let mut stream = response.bytes_stream();
+        let mut total_bytes: u64 = 0;
         loop {
             tokio::select! {
                 cmd = cmd_rx.recv() => {
+                    log_info!("radio: playlist switch requested, stopping stream");
                     cancel.store(true, Ordering::Relaxed);
                     drop(byte_tx);
                     return cmd.map(|c| match c {
@@ -127,16 +132,18 @@ pub async fn run(
                 chunk = stream.next() => {
                     match chunk {
                         Some(Ok(bytes)) => {
+                            total_bytes += bytes.len() as u64;
                             if byte_tx.send(bytes).await.is_err() {
+                                log_warn!("radio: decode side closed the byte channel");
                                 break;
                             }
                         }
                         Some(Err(e)) => {
-                            eprintln!("radio: stream error: {e}");
+                            log_error!("radio: stream error after {total_bytes} bytes: {e}");
                             break;
                         }
                         None => {
-                            eprintln!("radio: station closed the stream");
+                            log_warn!("radio: station closed the stream after {total_bytes} bytes");
                             break;
                         }
                     }
@@ -146,10 +153,12 @@ pub async fn run(
 
         drop(byte_tx);
         match decode_handle.await {
-            Ok(pump::Outcome::Exhausted) => eprintln!("radio: session ended, reconnecting"),
-            Ok(pump::Outcome::Interrupted) => eprintln!("radio: session interrupted"),
-            Ok(pump::Outcome::Failed(e)) => eprintln!("radio: session failed: {e}, reconnecting"),
-            Err(e) => eprintln!("radio: decode task panicked: {e}"),
+            Ok(pump::Outcome::Exhausted) => log_info!("radio: session ended, reconnecting"),
+            Ok(pump::Outcome::Interrupted) => log_info!("radio: session interrupted"),
+            Ok(pump::Outcome::Failed(e)) => {
+                log_error!("radio: session failed: {e}, reconnecting")
+            }
+            Err(e) => log_error!("radio: decode task panicked: {e}"),
         }
 
         if let Some(next) = wait_or_switch(cmd_rx, playlist_count, pl_idx, 2).await {

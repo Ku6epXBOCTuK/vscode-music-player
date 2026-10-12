@@ -7,3 +7,4 @@ static
 *.log
 .DS_Store
 backend
+CHANGELOG.md

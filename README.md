@@ -77,10 +77,29 @@ Code, настройки в браузере, трансляция звука в
 - `volume` — 0.0–1.0
 - Плейлисты удобнее добавлять через панель настроек в браузере
 
-## Удаление
+## Logs
 
-Удали папку с `backend.exe` (там же `config.json`) и расширение из VS Code.
-Других следов программа не оставляет.
+The backend writes a detailed log to `music-player.log` next to `backend.exe`
+(same folder as `config.json`). The same text goes to the console when one is
+attached, so the file is the only source of truth for a detached run.
+
+Default level is `info` (`debug` in debug builds). Override it with the
+`MUSIC_PLAYER_LOG` environment variable:
+
+```powershell
+$env:MUSIC_PLAYER_LOG = "debug"
+.\backend.exe
+```
+
+Accepted values: `debug`, `info`, `warn`, `error`. At `debug` the log includes
+codec, sample rate and channel count per source, file sizes and decode progress.
+Once the log reaches 4 MB it is renamed to `music-player.log.1` and a fresh file
+is started.
+
+## Uninstall
+
+Delete the folder holding `backend.exe` (it also holds `config.json` and
+`music-player.log`), then remove the extension from VS Code.
 
 ## Лицензия
 

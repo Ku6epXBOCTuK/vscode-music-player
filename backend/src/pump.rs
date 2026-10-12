@@ -44,12 +44,23 @@ pub fn pump(
         Err(e) => return Outcome::Failed(format!("probe failed: {e}")),
     };
     let mut format = probed.format;
+    log_debug!(
+        "pump: probed format (tracks in container: {})",
+        format.tracks().len()
+    );
 
     let track = match format.default_track() {
         Some(t) => t,
         None => return Outcome::Failed("no default audio track".to_string()),
     };
     let track_id = track.id;
+    log_debug!(
+        "pump: track {} codec {:?}, time_base {:?}, n_frames {:?}",
+        track_id,
+        track.codec_params.codec,
+        track.codec_params.time_base,
+        track.codec_params.n_frames
+    );
     let mut decoder = match symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
     {
@@ -74,14 +85,17 @@ pub fn pump(
 
         let packet = match format.next_packet() {
             Ok(p) => p,
-            Err(SymphoniaError::IoError(_)) => {
-                println!(
-                    "source exhausted after {blocks_sent} blocks ({:.1}s of audio pumped)",
+            Err(SymphoniaError::IoError(e)) => {
+                log_info!(
+                    "pump: source exhausted after {blocks_sent} blocks ({:.1}s of audio): {e}",
                     started.elapsed().as_secs_f64()
                 );
                 return Outcome::Exhausted;
             }
-            Err(e) => return Outcome::Failed(format!("demux failed: {e}")),
+            Err(e) => {
+                log_error!("pump: demux failed: {e}");
+                return Outcome::Failed(format!("demux failed: {e}"));
+            }
         };
         if packet.track_id() != track_id {
             continue;
@@ -90,10 +104,17 @@ pub fn pump(
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
             Err(SymphoniaError::DecodeError(e)) => {
-                eprintln!("skipping corrupted packet: {e}");
+                log_warn!("pump: skipping corrupted packet: {e}");
                 continue;
             }
-            Err(e) => return Outcome::Failed(format!("decode failed: {e}")),
+            Err(SymphoniaError::IoError(e)) => {
+                log_warn!("pump: io error while decoding, skipping packet: {e}");
+                continue;
+            }
+            Err(e) => {
+                log_error!("pump: decode failed: {e}");
+                return Outcome::Failed(format!("decode failed: {e}"));
+            }
         };
 
         let spec = *decoded.spec();
@@ -101,7 +122,19 @@ pub fn pump(
             in_rate = spec.rate;
             left_q.clear();
             right_q.clear();
-            resampler = if in_rate != audio::TARGET_RATE {
+            let resampling = in_rate != audio::TARGET_RATE;
+            log_info!(
+                "pump: audio spec {} Hz, {} channel(s){}, prebuffer {} blocks",
+                in_rate,
+                spec.channels.count(),
+                if resampling {
+                    format!(" -> resampling to {} Hz", audio::TARGET_RATE)
+                } else {
+                    " (no resampling)".to_string()
+                },
+                prebuffer_blocks
+            );
+            resampler = if resampling {
                 match FftFixedIn::<f32>::new(
                     in_rate as usize,
                     audio::TARGET_RATE as usize,
@@ -110,7 +143,10 @@ pub fn pump(
                     2,
                 ) {
                     Ok(r) => Some(r),
-                    Err(e) => return Outcome::Failed(format!("resampler init failed: {e}")),
+                    Err(e) => {
+                        log_error!("pump: resampler init failed: {e}");
+                        return Outcome::Failed(format!("resampler init failed: {e}"));
+                    }
                 }
             } else {
                 None
@@ -135,7 +171,10 @@ pub fn pump(
                     let r: Vec<f32> = right_q.drain(..RESAMPLE_CHUNK).collect();
                     let result = match rs.process(&[l, r], None) {
                         Ok(r) => r,
-                        Err(e) => return Outcome::Failed(format!("resample failed: {e}")),
+                        Err(e) => {
+                            log_error!("pump: resample failed: {e}");
+                            return Outcome::Failed(format!("resample failed: {e}"));
+                        }
                     };
                     for (l, r) in result[0].iter().zip(result[1].iter()) {
                         out.push_back(*l);
@@ -156,6 +195,9 @@ pub fn pump(
             if prebuffering {
                 prebuffer.push(block);
                 if prebuffer.len() >= prebuffer_blocks {
+                    log_debug!(
+                        "pump: prebuffer filled ({prebuffer_blocks} blocks), starting output"
+                    );
                     for buffered in prebuffer.drain(..) {
                         if !send_block(pcm_tx, buffered, cancel) {
                             return finish(cancel);
@@ -169,6 +211,12 @@ pub fn pump(
                 return finish(cancel);
             }
             blocks_sent += 1;
+            if blocks_sent.is_multiple_of(1000) {
+                log_debug!(
+                    "pump: {blocks_sent} blocks sent ({:.1}s of audio)",
+                    started.elapsed().as_secs_f64()
+                );
+            }
         }
     }
 }
@@ -177,6 +225,7 @@ fn finish(cancel: &AtomicBool) -> Outcome {
     if cancel.load(Ordering::Relaxed) {
         Outcome::Interrupted
     } else {
+        log_error!("pump: pcm channel closed (consumer gone)");
         Outcome::Failed("pcm channel closed".to_string())
     }
 }

@@ -32,6 +32,7 @@ impl Status {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum Command {
     NextPlaylist,
     PrevPlaylist,
@@ -48,13 +49,20 @@ pub type Shared = Arc<RwLock<PlayerState>>;
 pub type SharedPlaylists = Arc<RwLock<Vec<Playlist>>>;
 
 fn build_queue(playlist: &Playlist) -> Result<Vec<PathBuf>, String> {
+    log_debug!(
+        "building queue for playlist '{}' ({}): {}",
+        playlist.name,
+        playlist.kind,
+        playlist.path
+    );
     match playlist.kind.as_str() {
         "local_folder" => {
             let files = audio::scan_folder(std::path::Path::new(&playlist.path))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("cannot scan '{}': {e}", playlist.path))?;
             if files.is_empty() {
                 Err(format!("folder has no audio files: {}", playlist.path))
             } else {
+                log_info!("queue for '{}': {} tracks", playlist.name, files.len());
                 Ok(files)
             }
         }
@@ -82,6 +90,12 @@ pub fn spawn(
     let task_state = state.clone();
     let task_playlists = playlists.clone();
     tokio::spawn(async move {
+        log_info!(
+            "player task started: start index {}, queue {} tracks, volume {:.2}",
+            start_index,
+            initial_queue.len(),
+            volume
+        );
         let mut queue = initial_queue;
         let mut pl_idx = start_index;
         let mut pos = 0usize;
@@ -92,6 +106,7 @@ pub fn spawn(
             let playlists = task_playlists.read().expect("playlists poisoned").clone();
 
             if let Some(new_idx) = switch.take() {
+                log_info!("switching to playlist index {new_idx}");
                 match playlists.get(new_idx).map(build_queue) {
                     Some(Ok(q)) => {
                         queue = q;
@@ -102,12 +117,27 @@ pub fn spawn(
                             s.playlist_index = pl_idx;
                         }
                         epoch_tx.send_modify(|e| *e += 1);
-                        println!("switched playlist: {}", playlists[pl_idx].name);
+                        log_info!(
+                            "switched playlist: '{}' (index {}, {} tracks)",
+                            playlists[pl_idx].name,
+                            pl_idx,
+                            queue.len()
+                        );
                     }
                     Some(Err(e)) => {
-                        eprintln!("cannot switch to {}: {e}", playlists[new_idx].name)
+                        let current = playlists
+                            .get(pl_idx)
+                            .map(|p| p.name.as_str())
+                            .unwrap_or("unknown");
+                        log_error!(
+                            "cannot switch to playlist index {new_idx} ('{}'): {e}; keeping playlist '{current}'",
+                            playlists[new_idx].name
+                        );
                     }
-                    None => eprintln!("playlist index {new_idx} no longer exists"),
+                    None => log_error!(
+                        "playlist index {new_idx} no longer exists ({} configured), staying on index {pl_idx}",
+                        playlists.len()
+                    ),
                 }
             }
 
@@ -118,19 +148,26 @@ pub fn spawn(
                     let mut s = task_state.write().expect("player state poisoned");
                     s.current_track = Some(pl.name.clone());
                 }
-                println!("now playing: radio {}", pl.name);
+                log_info!("now playing: radio '{}' -> {}", pl.name, pl.path);
                 match crate::radio::run(&pl.path, &pcm_tx, &mut cmd_rx, playlists.len(), pl_idx)
                     .await
                 {
                     Some(new_idx) => {
+                        log_info!("radio requested switch to playlist index {new_idx}");
                         switch = Some(new_idx);
                         continue;
                     }
-                    None => return,
+                    None => {
+                        log_warn!("radio pipeline closed, player task exiting");
+                        return;
+                    }
                 }
             }
 
             if queue.is_empty() {
+                log_debug!(
+                    "queue empty on playlist index {pl_idx}, waiting for playlists to be added"
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 continue;
             }
@@ -144,16 +181,29 @@ pub fn spawn(
                 let mut s = task_state.write().expect("player state poisoned");
                 s.current_track = Some(name.clone());
             }
-            println!("now playing: {name}");
+            log_info!(
+                "now playing: {name} (track {}/{})",
+                pos % queue.len() + 1,
+                queue.len()
+            );
+            log_debug!("  file: {}", path.display());
 
             let file = match std::fs::File::open(&path) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("failed to open {name}: {e}");
+                    log_error!(
+                        "failed to open '{}': {e}, skipping to next track",
+                        path.display()
+                    );
                     pos += 1;
                     continue;
                 }
             };
+            log_debug!(
+                "  opened {} ({} bytes)",
+                path.display(),
+                file.metadata().map(|m| m.len()).unwrap_or(0)
+            );
 
             let cancel = Arc::new(AtomicBool::new(false));
             let pump_cancel = cancel.clone();
@@ -167,7 +217,7 @@ pub fn spawn(
                     cancel.store(true, Ordering::Relaxed);
                     let _ = handle.await;
                     if playlists.is_empty() {
-                        eprintln!("ignoring playlist switch: no playlists configured");
+                        log_error!("ignoring playlist switch: no playlists configured");
                     } else if let Some(c) = cmd {
                         let next = match c {
                             Command::NextPlaylist => (pl_idx + 1) % playlists.len(),
@@ -175,23 +225,47 @@ pub fn spawn(
                                 (pl_idx + playlists.len() - 1) % playlists.len()
                             }
                         };
+                        log_info!(
+                            "command {c:?}: playlist '{}' (index {pl_idx}) -> index {next}",
+                            playlists[pl_idx].name
+                        );
                         switch = Some(next);
+                    } else {
+                        log_warn!("playlist command channel closed, player task exiting");
+                        return;
                     }
                 }
                 result = &mut handle => {
+                    let playlist_name = playlists
+                        .get(pl_idx)
+                        .map(|p| p.name.as_str())
+                        .unwrap_or("unknown");
                     match result {
-                        Ok(pump::Outcome::Exhausted) => {}
-                        Ok(pump::Outcome::Interrupted) => {}
-                        Ok(pump::Outcome::Failed(e)) => {
-                            eprintln!("playback of {name} failed: {e}")
+                        Ok(pump::Outcome::Exhausted) => {
+                            log_info!("track finished: {name} (playlist '{playlist_name}')")
                         }
-                        Err(e) => eprintln!("pump task panicked for {name}: {e}"),
+                        Ok(pump::Outcome::Interrupted) => {
+                            log_info!("track interrupted: {name} (playlist '{playlist_name}')")
+                        }
+                        Ok(pump::Outcome::Failed(e)) => log_error!(
+                            "playback of '{name}' failed: {e} | file: {} | playlist '{playlist_name}' (index {pl_idx})",
+                            path.display()
+                        ),
+                        Err(e) => log_error!(
+                            "pump task panicked for '{name}' (file: {}): {e}",
+                            path.display()
+                        ),
                     }
                 }
             }
 
             if switch.is_none() {
                 pos += 1;
+                log_debug!(
+                    "queue position advanced to {} of {}",
+                    pos % queue.len().max(1) + 1,
+                    queue.len()
+                );
             }
         }
     });

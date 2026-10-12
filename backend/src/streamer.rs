@@ -70,10 +70,15 @@ pub fn start_encoder(
         let mut framebuf = match FrameBuf::with_size(2, BLOCK_SIZE) {
             Ok(fb) => fb,
             Err(e) => {
-                eprintln!("failed to allocate FLAC frame buffer: {e}");
+                log_error!("failed to allocate FLAC frame buffer: {e}");
                 return;
             }
         };
+        log_info!(
+            "encoder loop started (block {} frames, {} ms per frame)",
+            BLOCK_SIZE,
+            block_duration.as_millis()
+        );
 
         loop {
             // playlist switch: drop buffered audio from the previous source
@@ -83,7 +88,7 @@ pub fn start_encoder(
                 while pcm_rx.try_recv().is_ok() {
                     dropped += 1;
                 }
-                println!("source switched (epoch {epoch}), flushed {dropped} stale blocks");
+                log_info!("source switched (epoch {epoch}), flushed {dropped} stale blocks");
             }
 
             let (playing, volume) = {
@@ -106,7 +111,10 @@ pub fn start_encoder(
                     Err(_) => {
                         underruns += 1;
                         if underruns == 1 || underruns.is_multiple_of(500) {
-                            eprintln!("pcm underrun: encoder starved ({underruns} blocks)");
+                            log_warn!(
+                                "pcm underrun: encoder starved ({underruns} blocks, playback status {})",
+                                if playing { "playing" } else { "paused/stopped" }
+                            );
                         }
                         vec![0.0; BLOCK_SIZE * 2]
                     }
@@ -148,6 +156,12 @@ pub fn start_encoder(
             let bytes = Bytes::copy_from_slice(sink.as_slice());
 
             let _ = producer_tx.send(bytes.clone());
+            if producer_tx.receiver_count() > 0 && frame_number.is_multiple_of(1000) {
+                log_debug!(
+                    "frame {frame_number} broadcast to {} subscriber(s)",
+                    producer_tx.receiver_count()
+                );
+            }
             {
                 let mut queue = producer_recent.write().expect("recent buffer poisoned");
                 queue.push_back(bytes);

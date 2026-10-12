@@ -32,9 +32,18 @@ decode FILE="testdata/sample.mp3":
 health:
     curl -s http://127.0.0.1:45880/api/health
 
-# Show current playback state (track, status, volume)
+# Show the current playback state (track, status, volume)
 status:
     curl -s http://127.0.0.1:45880/api/now_playing
+
+# Tail the backend log (written next to the binary)
+logs LINES="40":
+    Get-Content backend/target/release/music-player.log -Tail {{LINES}} -Wait
+
+# Run the backend with debug logging enabled
+backend-debug:
+    $env:MUSIC_PLAYER_LOG = "debug"
+    -./backend/target/release/backend.exe
 
 # Send a control action: play / pause / stop / next_playlist / prev_playlist
 control ACTION="play":

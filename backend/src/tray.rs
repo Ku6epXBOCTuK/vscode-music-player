@@ -65,7 +65,7 @@ pub fn run(port: u16, player: player::Shared, shutdown: CancellationToken) {
         {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("failed to create tray icon: {e}");
+                log_error!("failed to create tray icon: {e}");
                 return;
             }
         };
@@ -75,7 +75,7 @@ pub fn run(port: u16, player: player::Shared, shutdown: CancellationToken) {
             if event.id == open_id {
                 open_in_browser(&format!("http://127.0.0.1:{port}"));
             } else if event.id == quit_id {
-                println!("shutdown requested via tray menu");
+                log_info!("shutdown requested via tray menu");
                 shutdown_handler.cancel();
             }
         }));
@@ -108,11 +108,11 @@ pub fn run(port: u16, player: player::Shared, shutdown: CancellationToken) {
             }
         }
         drop(tray);
-        println!("tray icon removed");
+        log_info!("tray icon removed");
     });
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn run(_port: u16, _player: player::Shared, _shutdown: CancellationToken) {
-    eprintln!("tray icon is only supported on Windows in this build");
+    log_error!("tray icon is only supported on Windows in this build");
 }
