@@ -37,11 +37,14 @@ interface NowPlaying {
 	playlist_index: number;
 	playlist: string | null;
 	playlist_type: string | null;
+	shuffle: boolean;
 }
 
 let trackItem: vscode.StatusBarItem;
 let toggleItem: vscode.StatusBarItem;
 let nextItem: vscode.StatusBarItem;
+let nextTrackItem: vscode.StatusBarItem;
+let shuffleItem: vscode.StatusBarItem;
 let volumeItem: vscode.StatusBarItem;
 let stopItem: vscode.StatusBarItem;
 let lastState: NowPlaying | undefined;
@@ -209,7 +212,7 @@ async function refresh(): Promise<void> {
 		}
 		backendStartAttempted = false;
 		trackItem.text = "$(error) Music off";
-		trackItem.tooltip = "music server is not running (press play to start it)";
+		trackItem.tooltip = "Music server is not running";
 		toggleItem.text = "$(play)";
 		toggleItem.tooltip = "Start music server";
 		return;
@@ -219,16 +222,28 @@ async function refresh(): Promise<void> {
 		log("[music-player] backend is online");
 	}
 	trackItem.text = statusText(lastState);
-	trackItem.tooltip = `music-player: ${fullTitle(lastState)} (click to open settings)`;
+	trackItem.tooltip = `Music-player: ${fullTitle(lastState)} (click to open settings)`;
 	toggleItem.text =
 		lastState.status === "playing" ? "$(debug-pause)" : "$(play)";
 	toggleItem.tooltip = lastState.status === "playing" ? "Pause" : "Play";
 	volumeItem.text = `${Math.round(lastState.volume * 100)}%`;
 	volumeItem.tooltip = "Set volume (0-100, step 10)";
+	nextTrackItem.tooltip = "Next track";
+	nextItem.tooltip = "Next playlist";
+	shuffleItem.text = lastState.shuffle ? "$(arrow-swap)" : "$(list-ordered)";
+	shuffleItem.tooltip = lastState.shuffle
+		? "Turn shuffle off"
+		: "Turn shuffle on";
 }
 
 function setControlsVisible(online: boolean): void {
-	for (const item of [nextItem, volumeItem, stopItem]) {
+	for (const item of [
+		nextItem,
+		nextTrackItem,
+		shuffleItem,
+		volumeItem,
+		stopItem,
+	]) {
 		if (online) {
 			item.show();
 		} else {
@@ -243,7 +258,7 @@ async function safeRefresh(): Promise<void> {
 		await refresh();
 	} catch {
 		trackItem.text = "$(error) Music off";
-		trackItem.tooltip = "music server is not running";
+		trackItem.tooltip = "Music server is not running";
 	}
 }
 
@@ -251,7 +266,7 @@ async function control(action: string): Promise<void> {
 	if (await post("/api/control", { action })) {
 		setTimeout(safeRefresh, 250);
 	} else {
-		vscode.window.showWarningMessage("music server is not reachable");
+		vscode.window.showWarningMessage("Music server is not reachable");
 	}
 }
 
@@ -301,18 +316,28 @@ export function activate(context: vscode.ExtensionContext): void {
 		toggleItem = makeItem(48);
 		toggleItem.command = "music-player.toggle";
 
-		nextItem = makeItem(47);
-		nextItem.text = "$(chevron-right)";
+		nextTrackItem = makeItem(47);
+		nextTrackItem.text = "$(chevron-right)";
+		nextTrackItem.tooltip = "Next track";
+		nextTrackItem.command = "music-player.nextTrack";
+
+		nextItem = makeItem(46);
+		nextItem.text = "$(library)";
 		nextItem.tooltip = "Next playlist";
 		nextItem.command = "music-player.nextPlaylist";
 
-		volumeItem = makeItem(46);
+		shuffleItem = makeItem(45);
+		shuffleItem.command = "music-player.toggleShuffle";
+
+		volumeItem = makeItem(44);
 		volumeItem.command = "music-player.setVolume";
 
 		for (const item of [
 			trackItem,
 			toggleItem,
 			nextItem,
+			nextTrackItem,
+			shuffleItem,
 			volumeItem,
 			stopItem,
 		]) {
@@ -339,6 +364,12 @@ export function activate(context: vscode.ExtensionContext): void {
 			}),
 			vscode.commands.registerCommand("music-player.nextPlaylist", () =>
 				control("next_playlist"),
+			),
+			vscode.commands.registerCommand("music-player.nextTrack", () =>
+				control("next_track"),
+			),
+			vscode.commands.registerCommand("music-player.toggleShuffle", () =>
+				control("toggle_shuffle"),
 			),
 			vscode.commands.registerCommand("music-player.prevPlaylist", () =>
 				control("prev_playlist"),

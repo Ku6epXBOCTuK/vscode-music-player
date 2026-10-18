@@ -46,6 +46,14 @@
 				"title": "Music Player: Next Playlist"
 			},
 			{
+				"command": "music-player.nextTrack",
+				"title": "Music Player: Next Track"
+			},
+			{
+				"command": "music-player.toggleShuffle",
+				"title": "Music Player: Toggle Shuffle"
+			},
+			{
 				"command": "music-player.prevPlaylist",
 				"title": "Music Player: Previous Playlist"
 			},

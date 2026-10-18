@@ -20,6 +20,7 @@ futures-util = "0.3"
 flacenc = "0.5"
 async-stream = "0.3"
 bytes = "1"
+fastrand = "2"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.21"

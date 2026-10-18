@@ -32,10 +32,12 @@ impl Status {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     NextPlaylist,
     PrevPlaylist,
+    NextTrack,
+    ToggleShuffle,
 }
 
 pub struct PlayerState {
@@ -47,6 +49,7 @@ pub struct PlayerState {
 
 pub type Shared = Arc<RwLock<PlayerState>>;
 pub type SharedPlaylists = Arc<RwLock<Vec<Playlist>>>;
+pub type SharedShuffle = Arc<AtomicBool>;
 
 fn build_queue(playlist: &Playlist) -> Result<Vec<PathBuf>, String> {
     log_debug!(
@@ -76,6 +79,7 @@ pub fn spawn(
     start_index: usize,
     initial_queue: Vec<PathBuf>,
     volume: f32,
+    shuffle_flag: SharedShuffle,
     pcm_tx: mpsc::Sender<Vec<f32>>,
     epoch_tx: watch::Sender<u64>,
 ) -> (Shared, mpsc::Sender<Command>) {
@@ -97,9 +101,19 @@ pub fn spawn(
             volume
         );
         let mut queue = initial_queue;
+        let mut order: Vec<usize> = (0..queue.len()).collect();
         let mut pl_idx = start_index;
         let mut pos = 0usize;
         let mut switch: Option<usize> = None;
+        let mut shuffle = shuffle_flag.load(Ordering::Relaxed);
+        if shuffle {
+            fastrand::shuffle(&mut order);
+        }
+        log_info!(
+            "player queue ready: {} tracks, shuffle {}",
+            order.len(),
+            shuffle
+        );
 
         loop {
             // snapshot: additions via POST /api/playlists apply on the next iteration
@@ -112,6 +126,10 @@ pub fn spawn(
                         queue = q;
                         pl_idx = new_idx;
                         pos = 0;
+                        order = (0..queue.len()).collect();
+                        if shuffle {
+                            fastrand::shuffle(&mut order);
+                        }
                         {
                             let mut s = task_state.write().expect("player state poisoned");
                             s.playlist_index = pl_idx;
@@ -141,6 +159,21 @@ pub fn spawn(
                 }
             }
 
+            let flag = shuffle_flag.load(Ordering::Relaxed);
+            if flag != shuffle {
+                shuffle = flag;
+                let current = order.get(pos % order.len().max(1)).copied().unwrap_or(0);
+                order = (0..queue.len()).collect();
+                if shuffle {
+                    fastrand::shuffle(&mut order);
+                }
+                pos = order.iter().position(|&i| i == current).unwrap_or(0);
+                log_info!(
+                    "shuffle {} from outside the player, keeping the current track and applying the new order",
+                    if shuffle { "enabled" } else { "disabled" }
+                );
+            }
+
             if let Some(pl) = playlists.get(pl_idx)
                 && pl.kind == "network_radio"
             {
@@ -149,8 +182,15 @@ pub fn spawn(
                     s.current_track = Some(pl.name.clone());
                 }
                 log_info!("now playing: radio '{}' -> {}", pl.name, pl.path);
-                match crate::radio::run(&pl.path, &pcm_tx, &mut cmd_rx, playlists.len(), pl_idx)
-                    .await
+                match crate::radio::run(
+                    &pl.path,
+                    &pcm_tx,
+                    &mut cmd_rx,
+                    &shuffle_flag,
+                    playlists.len(),
+                    pl_idx,
+                )
+                .await
                 {
                     Some(new_idx) => {
                         log_info!("radio requested switch to playlist index {new_idx}");
@@ -172,7 +212,8 @@ pub fn spawn(
                 continue;
             }
 
-            let path = queue[pos % queue.len()].clone();
+            let queue_pos = order.get(pos % order.len()).copied().unwrap_or(0);
+            let path = queue[queue_pos].clone();
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -183,8 +224,8 @@ pub fn spawn(
             }
             log_info!(
                 "now playing: {name} (track {}/{})",
-                pos % queue.len() + 1,
-                queue.len()
+                pos % order.len() + 1,
+                order.len()
             );
             log_debug!("  file: {}", path.display());
 
@@ -212,59 +253,88 @@ pub fn spawn(
                 pump::pump(Box::new(file), &pump_tx, &pump_cancel, 0)
             });
 
-            tokio::select! {
-                cmd = cmd_rx.recv() => {
-                    cancel.store(true, Ordering::Relaxed);
-                    let _ = handle.await;
-                    if playlists.is_empty() {
-                        log_error!("ignoring playlist switch: no playlists configured");
-                    } else if let Some(c) = cmd {
-                        let next = match c {
-                            Command::NextPlaylist => (pl_idx + 1) % playlists.len(),
-                            Command::PrevPlaylist => {
-                                (pl_idx + playlists.len() - 1) % playlists.len()
-                            }
+            loop {
+                tokio::select! {
+                    cmd = cmd_rx.recv() => {
+                        let Some(c) = cmd else {
+                            cancel.store(true, Ordering::Relaxed);
+                            let _ = handle.await;
+                            log_warn!("playlist command channel closed, player task exiting");
+                            return;
                         };
-                        log_info!(
-                            "command {c:?}: playlist '{}' (index {pl_idx}) -> index {next}",
-                            playlists[pl_idx].name
-                        );
-                        switch = Some(next);
-                    } else {
-                        log_warn!("playlist command channel closed, player task exiting");
-                        return;
+                        if matches!(c, Command::ToggleShuffle) {
+                            shuffle = !shuffle;
+                            let current = order.get(pos % order.len()).copied().unwrap_or(0);
+                            order = (0..queue.len()).collect();
+                            if shuffle {
+                                fastrand::shuffle(&mut order);
+                            }
+                            pos = order.iter().position(|&i| i == current).unwrap_or(0);
+                            shuffle_flag.store(shuffle, Ordering::Relaxed);
+                            log_info!(
+                                "shuffle turned {}: '{name}' keeps playing, the new order applies from the next track",
+                                if shuffle { "on" } else { "off" }
+                            );
+                            continue;
+                        }
+                        cancel.store(true, Ordering::Relaxed);
+                        let _ = handle.await;
+                        if matches!(c, Command::NextPlaylist | Command::PrevPlaylist) {
+                            if playlists.is_empty() {
+                                log_error!("ignoring playlist switch: no playlists configured");
+                            } else {
+                                let next = if matches!(c, Command::NextPlaylist) {
+                                    (pl_idx + 1) % playlists.len()
+                                } else {
+                                    (pl_idx + playlists.len() - 1) % playlists.len()
+                                };
+                                log_info!(
+                                    "command {c:?}: playlist '{}' (index {pl_idx}) -> index {next}",
+                                    playlists[pl_idx].name
+                                );
+                                switch = Some(next);
+                            }
+                        } else {
+                            log_info!("command {c:?}: stopping '{name}' and moving on");
+                        }
+                        break;
                     }
-                }
-                result = &mut handle => {
-                    let playlist_name = playlists
-                        .get(pl_idx)
-                        .map(|p| p.name.as_str())
-                        .unwrap_or("unknown");
-                    match result {
-                        Ok(pump::Outcome::Exhausted) => {
-                            log_info!("track finished: {name} (playlist '{playlist_name}')")
+                    result = &mut handle => {
+                        let playlist_name = playlists
+                            .get(pl_idx)
+                            .map(|p| p.name.as_str())
+                            .unwrap_or("unknown");
+                        match result {
+                            Ok(pump::Outcome::Exhausted) => {
+                                log_info!("track finished: {name} (playlist '{playlist_name}')")
+                            }
+                            Ok(pump::Outcome::Interrupted) => {
+                                log_info!("track interrupted: {name} (playlist '{playlist_name}')")
+                            }
+                            Ok(pump::Outcome::Failed(e)) => log_error!(
+                                "playback of '{name}' failed: {e} | file: {} | playlist '{playlist_name}' (index {pl_idx})",
+                                path.display()
+                            ),
+                            Err(e) => log_error!(
+                                "pump task panicked for '{name}' (file: {}): {e}",
+                                path.display()
+                            ),
                         }
-                        Ok(pump::Outcome::Interrupted) => {
-                            log_info!("track interrupted: {name} (playlist '{playlist_name}')")
-                        }
-                        Ok(pump::Outcome::Failed(e)) => log_error!(
-                            "playback of '{name}' failed: {e} | file: {} | playlist '{playlist_name}' (index {pl_idx})",
-                            path.display()
-                        ),
-                        Err(e) => log_error!(
-                            "pump task panicked for '{name}' (file: {}): {e}",
-                            path.display()
-                        ),
+                        break;
                     }
                 }
             }
 
             if switch.is_none() {
                 pos += 1;
+                if shuffle && order.len() > 1 && pos.is_multiple_of(order.len()) {
+                    fastrand::shuffle(&mut order);
+                    log_debug!("shuffle: new random round of {} tracks", order.len());
+                }
                 log_debug!(
                     "queue position advanced to {} of {}",
-                    pos % queue.len().max(1) + 1,
-                    queue.len()
+                    pos % order.len().max(1) + 1,
+                    order.len()
                 );
             }
         }

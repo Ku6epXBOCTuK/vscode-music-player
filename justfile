@@ -45,7 +45,7 @@ backend-debug:
     $env:MUSIC_PLAYER_LOG = "debug"
     -./backend/target/release/backend.exe
 
-# Send a control action: play / pause / stop / next_playlist / prev_playlist
+# Send a control action: play / pause / stop / next_track / next_playlist / prev_playlist / toggle_shuffle
 control ACTION="play":
     curl -s -X POST http://127.0.0.1:45880/api/control -H "Content-Type: application/json" -d "{\"action\":\"{{ACTION}}\"}"
 

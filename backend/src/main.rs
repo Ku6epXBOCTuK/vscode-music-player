@@ -43,6 +43,8 @@ struct Config {
     current_playlist_index: usize,
     volume: f32,
     port: u16,
+    #[serde(default)]
+    shuffle: bool,
     playlists: Vec<Playlist>,
 }
 
@@ -52,6 +54,7 @@ impl Default for Config {
             current_playlist_index: 0,
             volume: 0.8,
             port: 45880,
+            shuffle: false,
             playlists: Vec::new(),
         }
     }
@@ -95,12 +98,18 @@ struct AppState {
     audio: Arc<streamer::SharedAudio>,
     player: player::Shared,
     playlists: player::SharedPlaylists,
+    shuffle: player::SharedShuffle,
     port: u16,
     cmd_tx: tokio::sync::mpsc::Sender<player::Command>,
     shutdown: CancellationToken,
 }
 
-fn persist_config(port: u16, player: &player::Shared, playlists: &player::SharedPlaylists) {
+fn persist_config(
+    port: u16,
+    player: &player::Shared,
+    playlists: &player::SharedPlaylists,
+    shuffle: &player::SharedShuffle,
+) {
     let (volume, index) = {
         let s = player.read().expect("player state poisoned");
         (s.volume, s.playlist_index)
@@ -109,6 +118,7 @@ fn persist_config(port: u16, player: &player::Shared, playlists: &player::Shared
         current_playlist_index: index,
         volume,
         port,
+        shuffle: shuffle.load(std::sync::atomic::Ordering::Relaxed),
         playlists: playlists.read().expect("playlists poisoned").clone(),
     };
     let path = config_path();
@@ -198,11 +208,12 @@ async fn control_handler(
             log_info!("control: {}", status.as_str());
             StatusCode::OK
         }
-        "next_playlist" | "prev_playlist" => {
-            let cmd = if req.action == "next_playlist" {
-                player::Command::NextPlaylist
-            } else {
-                player::Command::PrevPlaylist
+        "next_playlist" | "prev_playlist" | "next_track" | "toggle_shuffle" => {
+            let cmd = match req.action.as_str() {
+                "next_playlist" => player::Command::NextPlaylist,
+                "prev_playlist" => player::Command::PrevPlaylist,
+                "next_track" => player::Command::NextTrack,
+                _ => player::Command::ToggleShuffle,
             };
             match state.cmd_tx.try_send(cmd) {
                 Ok(()) => {
@@ -210,7 +221,7 @@ async fn control_handler(
                     StatusCode::OK
                 }
                 Err(e) => {
-                    log_error!("failed to queue playlist switch: {e}");
+                    log_error!("failed to queue {}: {e}", req.action);
                     StatusCode::INTERNAL_SERVER_ERROR
                 }
             }
@@ -260,6 +271,7 @@ async fn now_playing_handler(State(state): State<Arc<AppState>>) -> Json<serde_j
         "playlist_index": index,
         "playlist": playlist,
         "playlist_type": playlist_type,
+        "shuffle": state.shuffle.load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 
@@ -339,7 +351,7 @@ async fn add_playlist_handler(
             playlists.len()
         );
     }
-    persist_config(state.port, &state.player, &state.playlists);
+    persist_config(state.port, &state.player, &state.playlists, &state.shuffle);
     StatusCode::OK
 }
 
@@ -406,9 +418,10 @@ async fn main() {
 
     let config = load_or_create_config();
     log_info!(
-        "config: port {}, volume {:.2}, {} playlist(s), start index {}",
+        "config: port {}, volume {:.2}, shuffle {}, {} playlist(s), start index {}",
         config.port,
         config.volume,
+        config.shuffle,
         config.playlists.len(),
         config.current_playlist_index
     );
@@ -485,11 +498,14 @@ async fn main() {
     let (epoch_tx, epoch_rx) = tokio::sync::watch::channel(0u64);
     let playlists_shared: player::SharedPlaylists =
         Arc::new(RwLock::new(config.playlists.clone()));
+    let shuffle_flag: player::SharedShuffle =
+        Arc::new(std::sync::atomic::AtomicBool::new(config.shuffle));
     let (player_state, cmd_tx) = player::spawn(
         playlists_shared.clone(),
         config.current_playlist_index,
         queue,
         config.volume,
+        shuffle_flag.clone(),
         pcm_tx,
         epoch_tx,
     );
@@ -510,6 +526,7 @@ async fn main() {
         audio: shared,
         player: player_state.clone(),
         playlists: playlists_shared.clone(),
+        shuffle: shuffle_flag.clone(),
         port: config.port,
         cmd_tx,
         shutdown: shutdown.clone(),
@@ -567,6 +584,7 @@ async fn main() {
         config.volume = s.volume;
         config.current_playlist_index = s.playlist_index;
     }
+    config.shuffle = shuffle_flag.load(std::sync::atomic::Ordering::Relaxed);
     config.playlists = playlists_shared
         .read()
         .expect("playlists poisoned")

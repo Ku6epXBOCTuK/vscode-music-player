@@ -130,6 +130,7 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
+ "fastrand",
  "flacenc",
  "futures-util",
  "reqwest",

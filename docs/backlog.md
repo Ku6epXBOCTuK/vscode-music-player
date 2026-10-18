@@ -20,4 +20,6 @@
       audio device, or just swapping what OBS hears).
 - [ ] **Two streams** — one play music for live twitch (track 1), one for vod
       (track 2).
-- [ ] **Settings for local files** — shuffle, song title
+- [x] **Shuffle** — random order for local playlists: status bar button,
+      `toggle_shuffle` in `/api/control`, persisted in `config.json`
+- [ ] **Settings for local files** — song title

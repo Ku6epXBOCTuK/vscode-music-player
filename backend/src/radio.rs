@@ -73,6 +73,7 @@ pub async fn run(
     url: &str,
     pcm_tx: &mpsc::Sender<Vec<f32>>,
     cmd_rx: &mut mpsc::Receiver<Command>,
+    shuffle: &AtomicBool,
     playlist_count: usize,
     pl_idx: usize,
 ) -> Option<usize> {
@@ -88,14 +89,14 @@ pub async fn run(
                     "radio: station returned HTTP {} (attempt {attempt})",
                     r.status()
                 );
-                if let Some(next) = wait_or_switch(cmd_rx, playlist_count, pl_idx, 5).await {
+                if let Some(next) = wait_or_switch(cmd_rx, shuffle, playlist_count, pl_idx, 5).await {
                     return Some(next);
                 }
                 continue;
             }
             Err(e) => {
                 log_error!("radio: connection failed (attempt {attempt}): {e}");
-                if let Some(next) = wait_or_switch(cmd_rx, playlist_count, pl_idx, 5).await {
+                if let Some(next) = wait_or_switch(cmd_rx, shuffle, playlist_count, pl_idx, 5).await {
                     return Some(next);
                 }
                 continue;
@@ -121,13 +122,31 @@ pub async fn run(
         loop {
             tokio::select! {
                 cmd = cmd_rx.recv() => {
-                    log_info!("radio: playlist switch requested, stopping stream");
-                    cancel.store(true, Ordering::Relaxed);
-                    drop(byte_tx);
-                    return cmd.map(|c| match c {
-                        Command::NextPlaylist => (pl_idx + 1) % playlist_count,
-                        Command::PrevPlaylist => (pl_idx + playlist_count - 1) % playlist_count,
-                    });
+                    match cmd {
+                        Some(Command::ToggleShuffle) => {
+                            toggle_shuffle(shuffle);
+                            continue;
+                        }
+                        Some(Command::NextTrack) => {
+                            log_debug!("radio: next track has no effect on a live stream");
+                            continue;
+                        }
+                        Some(Command::NextPlaylist) => {
+                            log_info!("radio: playlist switch requested, stopping stream");
+                            stop_stream(&cancel, byte_tx);
+                            return Some((pl_idx + 1) % playlist_count);
+                        }
+                        Some(Command::PrevPlaylist) => {
+                            log_info!("radio: playlist switch requested, stopping stream");
+                            stop_stream(&cancel, byte_tx);
+                            return Some((pl_idx + playlist_count - 1) % playlist_count);
+                        }
+                        None => {
+                            log_warn!("radio: command channel closed, stopping stream");
+                            stop_stream(&cancel, byte_tx);
+                            return None;
+                        }
+                    }
                 }
                 chunk = stream.next() => {
                     match chunk {
@@ -161,7 +180,7 @@ pub async fn run(
             Err(e) => log_error!("radio: decode task panicked: {e}"),
         }
 
-        if let Some(next) = wait_or_switch(cmd_rx, playlist_count, pl_idx, 2).await {
+        if let Some(next) = wait_or_switch(cmd_rx, shuffle, playlist_count, pl_idx, 2).await {
             return Some(next);
         }
     }
@@ -170,16 +189,41 @@ pub async fn run(
 // Waits `secs` for a playlist switch command; returns None on timeout.
 async fn wait_or_switch(
     cmd_rx: &mut mpsc::Receiver<Command>,
+    shuffle: &AtomicBool,
     playlist_count: usize,
     pl_idx: usize,
     secs: u64,
 ) -> Option<usize> {
     let wait = tokio::time::sleep(std::time::Duration::from_secs(secs));
-    tokio::select! {
-        cmd = cmd_rx.recv() => cmd.map(|c| match c {
-            Command::NextPlaylist => (pl_idx + 1) % playlist_count,
-            Command::PrevPlaylist => (pl_idx + playlist_count - 1) % playlist_count,
-        }),
-        _ = wait => None,
+    tokio::pin!(wait);
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => match cmd {
+                Some(Command::NextPlaylist) => return Some((pl_idx + 1) % playlist_count),
+                Some(Command::PrevPlaylist) => {
+                    return Some((pl_idx + playlist_count - 1) % playlist_count);
+                }
+                Some(Command::ToggleShuffle) => toggle_shuffle(shuffle),
+                Some(Command::NextTrack) => {
+                    log_debug!("radio: next track has no effect on a live stream")
+                }
+                None => return None,
+            },
+            _ = &mut wait => return None,
+        }
     }
+}
+
+fn toggle_shuffle(shuffle: &AtomicBool) {
+    let now = !shuffle.load(Ordering::Relaxed);
+    shuffle.store(now, Ordering::Relaxed);
+    log_info!(
+        "shuffle turned {} (the radio stream keeps playing)",
+        if now { "on" } else { "off" }
+    );
+}
+
+fn stop_stream(cancel: &AtomicBool, byte_tx: mpsc::Sender<Bytes>) {
+    cancel.store(true, Ordering::Relaxed);
+    drop(byte_tx);
 }
