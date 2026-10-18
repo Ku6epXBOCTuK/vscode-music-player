@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [0.2.0](https://github.com/Ku6epXBOCTuK/music-player/compare/d7f3fa9ca13509fb367bf057f8dd08bdcfbf3d51..0.2.0) - 2026-10-18
+#### Features
+- add shuffle mode adn next track action - ([860f164](https://github.com/Ku6epXBOCTuK/music-player/commit/860f164f98575f5ec4f9e487e86bebc4a81aea01)) - Ku6epXBOCTuK
+- update status bar ui - ([57e3909](https://github.com/Ku6epXBOCTuK/music-player/commit/57e390972d637cc824d30beeff55c9648f2d9940)) - Ku6epXBOCTuK
+- add more logs - ([d7f3fa9](https://github.com/Ku6epXBOCTuK/music-player/commit/d7f3fa9ca13509fb367bf057f8dd08bdcfbf3d51)) - Ku6epXBOCTuK
+
+- - -
+
 ## [0.1.0](https://github.com/Ku6epXBOCTuK/music-player/compare/c5c43642058f24f50bcdf35f8a0f62ae06342011..0.1.0) - 2026-10-09
 #### Features
 - add tray icon, menu - ([594c7b5](https://github.com/Ku6epXBOCTuK/music-player/commit/594c7b5eab8c2f391a19d3e46643d1ba1a9eab86)) - Ku6epXBOCTuK
