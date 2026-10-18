@@ -1,10 +1,12 @@
-import * as vscode from "vscode";
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync } from "node:fs";
 import * as path from "node:path";
+import * as vscode from "vscode";
 
 const POLL_INTERVAL_MS = 3000;
-const VOLUME_STEP = 0.1;
+const VOLUME_STEP_PERCENT = 10;
+const MAX_ALBUM_LENGTH = 20;
+const MAX_TRACK_LENGTH = 30;
 
 const out = vscode.window.createOutputChannel("Music Player");
 let logFile: string | undefined;
@@ -16,7 +18,7 @@ function log(message: string): void {
 		try {
 			appendFileSync(logFile, line + "\n");
 		} catch {
-			// logging must never break the extension
+			// NOTE: logging must never break the extension
 		}
 	}
 }
@@ -33,17 +35,53 @@ interface NowPlaying {
 	track: string | null;
 	volume: number;
 	playlist_index: number;
+	playlist: string | null;
+	playlist_type: string | null;
 }
 
 let trackItem: vscode.StatusBarItem;
 let toggleItem: vscode.StatusBarItem;
 let nextItem: vscode.StatusBarItem;
-let volDownItem: vscode.StatusBarItem;
 let volumeItem: vscode.StatusBarItem;
-let volUpItem: vscode.StatusBarItem;
 let stopItem: vscode.StatusBarItem;
 let lastState: NowPlaying | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
+
+function truncate(text: string, max: number): string {
+	if (text.length <= max) {
+		return text;
+	}
+	return `${text.slice(0, max - 3).trimEnd()}...`;
+}
+
+function cleanTrackName(raw: string): string {
+	const withoutExtension = raw.replace(/\.[^.]+$/, "");
+	const withoutNumber = withoutExtension.replace(/^\d{1,3}[\s._-]+/, "");
+	return withoutNumber.trim() || withoutExtension.trim();
+}
+
+function albumOf(state: NowPlaying): string | undefined {
+	return state.playlist_type === "local_folder" && state.playlist
+		? state.playlist
+		: undefined;
+}
+
+function fullTitle(state: NowPlaying): string {
+	const track = state.track ? cleanTrackName(state.track) : "-";
+	const album = albumOf(state);
+	return album ? `${album} - ${track}` : track;
+}
+
+function statusText(state: NowPlaying): string {
+	const track = truncate(
+		state.track ? cleanTrackName(state.track) : "-",
+		MAX_TRACK_LENGTH,
+	);
+	const album = albumOf(state);
+	return album
+		? `$(music) ${truncate(album, MAX_ALBUM_LENGTH)} - ${track}`
+		: `$(music) ${track}`;
+}
 
 async function post(path: string, body: unknown): Promise<boolean> {
 	try {
@@ -69,7 +107,7 @@ async function getNowPlaying(): Promise<NowPlaying | undefined> {
 			return (await res.json()) as NowPlaying;
 		}
 	} catch {
-		// backend offline
+		// NOTE: backend offline
 	}
 	return undefined;
 }
@@ -83,8 +121,8 @@ async function isBackendUp(): Promise<boolean> {
 	}
 }
 
-// Locates the backend binary. Order: explicit setting, repo root next to
-// the extension itself (development), opened workspace folders.
+// NOTE: Locates the backend binary. Order: explicit setting, repo root
+// next to the extension itself (development), opened workspace folders.
 // Returns the exe path and the cwd it must run in.
 function findBackend(
 	extensionPath: string,
@@ -128,7 +166,7 @@ function findBackend(
 
 let backendStartAttempted = false;
 
-// Starts the backend detached (it must survive VS Code closing).
+// NOTE: Starts the backend detached (it must survive VS Code closing).
 // Silent by design: the poll loop reflects the outcome in the status bar.
 function startBackendOnce(extensionPath: string): void {
 	if (backendStartAttempted) {
@@ -180,17 +218,17 @@ async function refresh(): Promise<void> {
 	if (!wasOnline) {
 		log("[music-player] backend is online");
 	}
-	trackItem.text = `$(music) ${lastState.track ?? "-"}`;
-	trackItem.tooltip = "music-player: open settings";
+	trackItem.text = statusText(lastState);
+	trackItem.tooltip = `music-player: ${fullTitle(lastState)} (click to open settings)`;
 	toggleItem.text =
 		lastState.status === "playing" ? "$(debug-pause)" : "$(play)";
 	toggleItem.tooltip = lastState.status === "playing" ? "Pause" : "Play";
 	volumeItem.text = `${Math.round(lastState.volume * 100)}%`;
-	volumeItem.tooltip = "Set volume (exact value)";
+	volumeItem.tooltip = "Set volume (0-100, step 10)";
 }
 
 function setControlsVisible(online: boolean): void {
-	for (const item of [nextItem, volDownItem, volumeItem, volUpItem, stopItem]) {
+	for (const item of [nextItem, volumeItem, stopItem]) {
 		if (online) {
 			item.show();
 		} else {
@@ -199,7 +237,7 @@ function setControlsVisible(online: boolean): void {
 	}
 }
 
-// Never let an exception escape into the extension host
+// NOTE: Never let an exception escape into the extension host
 async function safeRefresh(): Promise<void> {
 	try {
 		await refresh();
@@ -224,17 +262,26 @@ async function setVolume(volume: number): Promise<void> {
 	}
 }
 
-async function stepVolume(delta: number): Promise<void> {
-	if (!lastState) {
-		vscode.window.showWarningMessage("music server is not reachable");
-		return;
+async function pickVolume(): Promise<void> {
+	const current = lastState ? Math.round(lastState.volume * 100) : -1;
+	const choices: vscode.QuickPickItem[] = [];
+	for (let percent = 0; percent <= 100; percent += VOLUME_STEP_PERCENT) {
+		choices.push({
+			label: `${percent}%`,
+			description: percent === current ? "current" : undefined,
+		});
 	}
-	await setVolume(Math.round((lastState.volume + delta) * 100) / 100);
+	const picked = await vscode.window.showQuickPick(choices, {
+		placeHolder: "Volume (0-100)",
+	});
+	if (picked) {
+		await setVolume(Number.parseInt(picked.label, 10) / 100);
+	}
 }
 
 function makeItem(priority: number): vscode.StatusBarItem {
 	return vscode.window.createStatusBarItem(
-		vscode.StatusBarAlignment.Left,
+		vscode.StatusBarAlignment.Right,
 		priority,
 	);
 }
@@ -243,42 +290,30 @@ export function activate(context: vscode.ExtensionContext): void {
 	logFile = path.join(context.extensionPath, "music-player.log");
 	try {
 		log("[music-player] extension activated");
-		trackItem = makeItem(100);
+		trackItem = makeItem(50);
 		trackItem.command = "music-player.openSettings";
 
-		stopItem = makeItem(99);
+		stopItem = makeItem(49);
 		stopItem.text = "$(debug-stop)";
 		stopItem.tooltip = "Stop music server";
 		stopItem.command = "music-player.stopBackend";
 
-		toggleItem = makeItem(98);
+		toggleItem = makeItem(48);
 		toggleItem.command = "music-player.toggle";
 
-		nextItem = makeItem(97);
+		nextItem = makeItem(47);
 		nextItem.text = "$(chevron-right)";
 		nextItem.tooltip = "Next playlist";
 		nextItem.command = "music-player.nextPlaylist";
 
-		volDownItem = makeItem(96);
-		volDownItem.text = "$(remove)";
-		volDownItem.tooltip = "Volume down";
-		volDownItem.command = "music-player.volumeDown";
-
-		volumeItem = makeItem(95);
+		volumeItem = makeItem(46);
 		volumeItem.command = "music-player.setVolume";
-
-		volUpItem = makeItem(94);
-		volUpItem.text = "$(add)";
-		volUpItem.tooltip = "Volume up";
-		volUpItem.command = "music-player.volumeUp";
 
 		for (const item of [
 			trackItem,
 			toggleItem,
 			nextItem,
-			volDownItem,
 			volumeItem,
-			volUpItem,
 			stopItem,
 		]) {
 			context.subscriptions.push(item);
@@ -308,27 +343,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			vscode.commands.registerCommand("music-player.prevPlaylist", () =>
 				control("prev_playlist"),
 			),
-			vscode.commands.registerCommand("music-player.volumeUp", () =>
-				stepVolume(VOLUME_STEP),
+			vscode.commands.registerCommand("music-player.setVolume", () =>
+				pickVolume(),
 			),
-			vscode.commands.registerCommand("music-player.volumeDown", () =>
-				stepVolume(-VOLUME_STEP),
-			),
-			vscode.commands.registerCommand("music-player.setVolume", async () => {
-				const input = await vscode.window.showInputBox({
-					prompt: "Volume, 0 to 100",
-					value: lastState ? String(Math.round(lastState.volume * 100)) : "80",
-					validateInput: (v) => {
-						const n = Number(v);
-						return Number.isInteger(n) && n >= 0 && n <= 100
-							? undefined
-							: "enter an integer between 0 and 100";
-					},
-				});
-				if (input !== undefined) {
-					await setVolume(Number(input) / 100);
-				}
-			}),
 			vscode.commands.registerCommand("music-player.openSettings", () =>
 				vscode.env.openExternal(vscode.Uri.parse(baseUrl())),
 			),

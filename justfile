@@ -64,11 +64,8 @@ check-stream SECONDS="10":
 ext-setup:
     pnpm install
 
-# Build the VS Code extension
+# Build the VS Code extension and package it into a .vsix
 ext-build:
     pnpm --filter ./extension run compile
-
-# Package the extension into a .vsix file
-ext-package: ext-build
     Copy-Item LICENSE extension/LICENSE -Force
     pnpm --filter ./extension exec vsce package

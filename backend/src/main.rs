@@ -242,12 +242,24 @@ async fn volume_handler(
 }
 
 async fn now_playing_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let s = state.player.read().expect("player state poisoned");
+    let (status, track, volume, index) = {
+        let s = state.player.read().expect("player state poisoned");
+        (s.status, s.current_track.clone(), s.volume, s.playlist_index)
+    };
+    let (playlist, playlist_type) = {
+        let playlists = state.playlists.read().expect("playlists poisoned");
+        match playlists.get(index) {
+            Some(pl) => (Some(pl.name.clone()), Some(pl.kind.clone())),
+            None => (None, None),
+        }
+    };
     Json(serde_json::json!({
-        "status": s.status.as_str(),
-        "track": s.current_track,
-        "volume": s.volume,
-        "playlist_index": s.playlist_index,
+        "status": status.as_str(),
+        "track": track,
+        "volume": volume,
+        "playlist_index": index,
+        "playlist": playlist,
+        "playlist_type": playlist_type,
     }))
 }
 

@@ -51,15 +51,7 @@
 			},
 			{
 				"command": "music-player.setVolume",
-				"title": "Music Player: Set Volume"
-			},
-			{
-				"command": "music-player.volumeUp",
-				"title": "Music Player: Volume Up"
-			},
-			{
-				"command": "music-player.volumeDown",
-				"title": "Music Player: Volume Down"
+				"title": "Music Player: Set Volume (0-100)"
 			},
 			{
 				"command": "music-player.openSettings",

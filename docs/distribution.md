@@ -43,7 +43,7 @@ bundled in the .vsix.
 
 ## Notes
 
-- Current state for personal use: `just ext-package` produces
-  `extension/music-player-extension-<version>.vsix`; the backend path is set
-  manually via the `music-player.backendPath` setting.
+- Current state for personal use: `just ext-build` compiles the extension and
+  produces `extension/music-player-extension-<version>.vsix`; the backend path
+  is set manually via the `music-player.backendPath` setting.
 - Default port is 45880 (both sides configurable).
