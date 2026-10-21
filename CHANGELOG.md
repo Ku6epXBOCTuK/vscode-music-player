@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [0.3.0](https://github.com/Ku6epXBOCTuK/music-player/compare/52aa0b0e5c109147d590c479c6a666f7e9dbe59f..0.3.0) - 2026-10-21
+#### Features
+- update config workflow, add backend logging to extension - ([52aa0b0](https://github.com/Ku6epXBOCTuK/music-player/commit/52aa0b0e5c109147d590c479c6a666f7e9dbe59f)) - Ku6epXBOCTuK
+#### Bug Fixes
+- clear file extentions works only on local playlist - ([6662542](https://github.com/Ku6epXBOCTuK/music-player/commit/6662542c0a1f29b3d155e6c60e8a0cebe0dabdb6)) - Ku6epXBOCTuK
+
+- - -
+
 ## Unreleased
 #### Bug Fixes
 - config: validate and repair every value instead of falling back to defaults, so a broken file no longer wipes the playlists
