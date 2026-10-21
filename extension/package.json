@@ -73,7 +73,8 @@
 	},
 	"scripts": {
 		"compile": "node esbuild.js --production",
-		"watch": "node esbuild.js --watch"
+		"watch": "node esbuild.js --watch",
+		"test": "node test/run.js"
 	},
 	"devDependencies": {
 		"@types/node": "^20",
