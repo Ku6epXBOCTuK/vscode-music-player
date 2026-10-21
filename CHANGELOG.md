@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## Unreleased
+#### Bug Fixes
+- config: validate and repair every value instead of falling back to defaults, so a broken file no longer wipes the playlists
+- config: atomic writes (tmp + fsync + rename) and automatic backups (`config.json.bak`, `config.json.bak.2`)
+- config: a broken config file now stops the backend with a clear error instead of being overwritten with defaults
+- config: the state (volume, shuffle, playlist index) is saved on every change, not only on a clean shutdown
+- config: the port comes from the extension settings via `--port`, so the extension and the backend always agree
+
+- - -
 ## [0.2.0](https://github.com/Ku6epXBOCTuK/music-player/compare/d7f3fa9ca13509fb367bf057f8dd08bdcfbf3d51..0.2.0) - 2026-10-18
 #### Features
 - add shuffle mode adn next track action - ([860f164](https://github.com/Ku6epXBOCTuK/music-player/commit/860f164f98575f5ec4f9e487e86bebc4a81aea01)) - Ku6epXBOCTuK

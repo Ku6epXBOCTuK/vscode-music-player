@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync } from "node:fs";
+import {
+	appendFileSync,
+	closeSync,
+	existsSync,
+	fstatSync,
+	openSync,
+	readSync,
+} from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
@@ -23,11 +30,14 @@ function log(message: string): void {
 	}
 }
 
-function baseUrl(): string {
-	const port = vscode.workspace
+function backendPort(): number {
+	return vscode.workspace
 		.getConfiguration("music-player")
 		.get<number>("port", 45880);
-	return `http://127.0.0.1:${port}`;
+}
+
+function baseUrl(): string {
+	return `http://127.0.0.1:${backendPort()}`;
 }
 
 interface NowPlaying {
@@ -167,10 +177,45 @@ function findBackend(
 	return undefined;
 }
 
+// NOTE: Reads the last lines of a file without loading it entirely.
+function tailFile(file: string, maxLines = 12): string[] {
+	try {
+		if (!existsSync(file)) {
+			return [];
+		}
+		const fd = openSync(file, "r");
+		try {
+			const size = fstatSync(fd).size;
+			const length = Math.min(size, 16384);
+			const buffer = Buffer.alloc(length);
+			readSync(fd, buffer, 0, length, size - length);
+			return buffer
+				.toString("utf8")
+				.split(/\r?\n/)
+				.filter((line) => line.trim().length > 0)
+				.slice(-maxLines);
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return [];
+	}
+}
+
+// NOTE: The backend writes its own log next to the executable; the stderr
+// file catches the startup failures that happen before the log is opened.
+function backendLogTail(exeDir: string): string[] {
+	return [
+		...tailFile(path.join(exeDir, "backend-stderr.log")),
+		...tailFile(path.join(exeDir, "music-player.log")),
+	];
+}
+
 let backendStartAttempted = false;
 
 // NOTE: Starts the backend detached (it must survive VS Code closing).
-// Silent by design: the poll loop reflects the outcome in the status bar.
+// The port comes from the extension settings, so the backend and the
+// extension always agree on it.
 function startBackendOnce(extensionPath: string): void {
 	if (backendStartAttempted) {
 		return;
@@ -180,14 +225,25 @@ function startBackendOnce(extensionPath: string): void {
 		return;
 	}
 	backendStartAttempted = true;
+	const exeDir = path.dirname(backend.exe);
+	const stderrPath = path.join(exeDir, "backend-stderr.log");
+	let stderrFd: number | undefined;
 	try {
-		const child = spawn(backend.exe, [], {
+		stderrFd = openSync(stderrPath, "a");
+	} catch {
+		stderrFd = undefined;
+	}
+	try {
+		const child = spawn(backend.exe, ["--port", String(backendPort())], {
 			detached: true,
-			stdio: "ignore",
+			stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
 			cwd: backend.cwd,
 		});
+		if (stderrFd !== undefined) {
+			closeSync(stderrFd);
+		}
 		child.unref();
-		log(` started backend: ${backend.exe}`);
+		log(` started backend: ${backend.exe} (port ${backendPort()})`);
 	} catch (e) {
 		log(` failed to start backend: ${e}`);
 	}
@@ -199,6 +255,21 @@ async function ensureBackend(extensionPath: string): Promise<void> {
 		return;
 	}
 	log("[music-player] backend is down");
+	const backend = findBackend(extensionPath);
+	if (!backend) {
+		return;
+	}
+	const tail = backendLogTail(path.dirname(backend.exe));
+	if (tail.length === 0) {
+		return;
+	}
+	for (const line of tail) {
+		log(` backend: ${line}`);
+	}
+	const last = tail[tail.length - 1];
+	vscode.window.showWarningMessage(
+		`Music server is not running. Last backend message: ${last}`,
+	);
 }
 
 async function refresh(): Promise<void> {

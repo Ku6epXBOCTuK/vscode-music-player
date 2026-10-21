@@ -2,10 +2,10 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{Html, Response};
-use axum::{routing::get, routing::post, Json, Router};
-use serde::{Deserialize, Serialize};
+use axum::{Json, Router, routing::get, routing::post};
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -16,17 +16,18 @@ use tower_http::cors::CorsLayer;
 #[macro_use]
 mod log;
 mod audio;
+mod config;
 mod player;
 mod pump;
 mod radio;
 mod streamer;
 mod tray;
 
-use player::Playlist;
+use config::{Config, Playlist};
 
 #[cfg(target_os = "windows")]
 fn attach_parent_console() {
-    // the binary is built with windows_subsystem (no console window), but
+    // NOTE: the binary is built with windows_subsystem (no console window), but
     // when started from a terminal we still want log output there
     unsafe {
         let _ = windows::Win32::System::Console::AttachConsole(
@@ -38,100 +39,75 @@ fn attach_parent_console() {
 #[cfg(not(target_os = "windows"))]
 fn attach_parent_console() {}
 
-#[derive(Serialize, Deserialize)]
-struct Config {
-    current_playlist_index: usize,
-    volume: f32,
-    port: u16,
-    #[serde(default)]
-    shuffle: bool,
-    playlists: Vec<Playlist>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            current_playlist_index: 0,
-            volume: 0.8,
-            port: 45880,
-            shuffle: false,
-            playlists: Vec::new(),
-        }
-    }
-}
-
-fn config_path() -> PathBuf {
-    let exe_dir = std::env::current_exe()
-        .expect("cannot locate executable")
-        .parent()
-        .expect("executable has no parent directory")
-        .to_path_buf();
-    exe_dir.join("config.json")
-}
-
-fn load_or_create_config() -> Config {
-    let path = config_path();
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str(&text) {
-            Ok(config) => {
-                log_info!("loaded config: {}", path.display());
-                config
-            }
-            Err(e) => {
-                log_error!("config.json is corrupted ({e}), falling back to defaults");
-                Config::default()
-            }
-        },
-        Err(e) => {
-            log_info!("no config at {} ({e}), creating defaults", path.display());
-            let config = Config::default();
-            let text = serde_json::to_string_pretty(&config).expect("cannot serialize config");
-            if let Err(e) = std::fs::write(&path, text) {
-                log_error!("cannot write config.json: {e}");
-            }
-            config
-        }
-    }
-}
-
 struct AppState {
     audio: Arc<streamer::SharedAudio>,
     player: player::Shared,
     playlists: player::SharedPlaylists,
     shuffle: player::SharedShuffle,
-    port: u16,
+    port: u32,
     cmd_tx: tokio::sync::mpsc::Sender<player::Command>,
     shutdown: CancellationToken,
 }
 
-fn persist_config(
-    port: u16,
-    player: &player::Shared,
-    playlists: &player::SharedPlaylists,
-    shuffle: &player::SharedShuffle,
-) {
+fn snapshot_config(state: &AppState) -> Config {
     let (volume, index) = {
-        let s = player.read().expect("player state poisoned");
+        let s = state.player.read().expect("player state poisoned");
         (s.volume, s.playlist_index)
     };
-    let config = Config {
+    Config {
+        version: config::CONFIG_VERSION,
         current_playlist_index: index,
         volume,
-        port,
-        shuffle: shuffle.load(std::sync::atomic::Ordering::Relaxed),
-        playlists: playlists.read().expect("playlists poisoned").clone(),
-    };
-    let path = config_path();
-    match serde_json::to_string_pretty(&config) {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(&path, text) {
-                log_error!("failed to save config to {}: {e}", path.display());
-            } else {
-                log_debug!("config saved to {}", path.display());
-            }
-        }
-        Err(e) => log_error!("failed to serialize config: {e}"),
+        port: state.port,
+        shuffle: state.shuffle.load(std::sync::atomic::Ordering::Relaxed),
+        playlists: state.playlists.read().expect("playlists poisoned").clone(),
     }
+}
+
+fn save_snapshot(state: &AppState) {
+    let snapshot = snapshot_config(state);
+    match config::save(&snapshot) {
+        Ok(()) => log_debug!("config saved"),
+        Err(e) => log_error!("failed to save the config: {e}"),
+    }
+}
+
+fn spawn_config_watcher(state: Arc<AppState>, last_saved: Config) {
+    tokio::spawn(async move {
+        let mut last_saved = last_saved;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let snapshot = snapshot_config(&state);
+            if snapshot.same_content(&last_saved) {
+                continue;
+            }
+            match config::save(&snapshot) {
+                Ok(()) => log_info!("config saved after a state change"),
+                Err(e) => log_error!("failed to save the config: {e}"),
+            }
+            last_saved = snapshot;
+        }
+    });
+}
+
+fn cli_port(args: &[String]) -> Result<Option<u32>, String> {
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--port" {
+            let value = iter.next().ok_or("--port needs a value")?;
+            return value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| format!("--port '{value}' is not a number"));
+        }
+        if let Some(value) = arg.strip_prefix("--port=") {
+            return value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|_| format!("--port '{value}' is not a number"));
+        }
+    }
+    Ok(None)
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -255,7 +231,12 @@ async fn volume_handler(
 async fn now_playing_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let (status, track, volume, index) = {
         let s = state.player.read().expect("player state poisoned");
-        (s.status, s.current_track.clone(), s.volume, s.playlist_index)
+        (
+            s.status,
+            s.current_track.clone(),
+            s.volume,
+            s.playlist_index,
+        )
     };
     let (playlist, playlist_type) = {
         let playlists = state.playlists.read().expect("playlists poisoned");
@@ -281,7 +262,11 @@ async fn index_handler() -> Html<&'static str> {
 
 async fn list_playlists_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let playlists = state.playlists.read().expect("playlists poisoned");
-    let current = state.player.read().expect("player state poisoned").playlist_index;
+    let current = state
+        .player
+        .read()
+        .expect("player state poisoned")
+        .playlist_index;
     Json(serde_json::json!({
         "current": current,
         "playlists": *playlists,
@@ -351,7 +336,7 @@ async fn add_playlist_handler(
             playlists.len()
         );
     }
-    persist_config(state.port, &state.player, &state.playlists, &state.shuffle);
+    save_snapshot(&state);
     StatusCode::OK
 }
 
@@ -385,7 +370,9 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("decode") {
         let path = PathBuf::from(
-            args.get(2).map(String::as_str).unwrap_or("testdata/sample.mp3"),
+            args.get(2)
+                .map(String::as_str)
+                .unwrap_or("testdata/sample.mp3"),
         );
         match audio::decode_file(&path) {
             Ok(stats) => {
@@ -416,7 +403,55 @@ async fn main() {
         return;
     }
 
-    let config = load_or_create_config();
+    let loaded = match config::load() {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            log_error!("cannot start: {e}");
+            eprintln!("music-player backend cannot start.");
+            eprintln!("config file: {}", e.path.display());
+            eprintln!("reason: {}", e.reason);
+            eprintln!(
+                "the file was left untouched; fix it or delete it to start with the default config"
+            );
+            let backup = config::backup_path_of_config();
+            if backup.exists() {
+                eprintln!(
+                    "a backup of the previous config may be at {}",
+                    backup.display()
+                );
+            }
+            std::process::exit(2);
+        }
+    };
+    for warning in &loaded.warnings {
+        log_warn!("config: {warning}");
+    }
+    let mut config = loaded.config;
+    let pre_override = config.clone();
+
+    match cli_port(&args) {
+        Ok(Some(port)) => {
+            if !(1024..=65535).contains(&port) {
+                log_error!("--port {port} is out of range");
+                eprintln!("--port {port} is out of range (1024-65535)");
+                std::process::exit(1);
+            }
+            if port != config.port {
+                log_info!(
+                    "port {port} requested on the command line, overriding {}",
+                    config.port
+                );
+            }
+            config.port = port;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            log_error!("{e}");
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+
     log_info!(
         "config: port {}, volume {:.2}, shuffle {}, {} playlist(s), start index {}",
         config.port,
@@ -434,7 +469,7 @@ async fn main() {
             pl.path
         );
     }
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.port as u16));
 
     let queue = match config.playlists.get(config.current_playlist_index) {
         Some(pl) if pl.kind == "network_radio" => {
@@ -496,8 +531,7 @@ async fn main() {
 
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(128);
     let (epoch_tx, epoch_rx) = tokio::sync::watch::channel(0u64);
-    let playlists_shared: player::SharedPlaylists =
-        Arc::new(RwLock::new(config.playlists.clone()));
+    let playlists_shared: player::SharedPlaylists = Arc::new(RwLock::new(config.playlists.clone()));
     let shuffle_flag: player::SharedShuffle =
         Arc::new(std::sync::atomic::AtomicBool::new(config.shuffle));
     let (player_state, cmd_tx) = player::spawn(
@@ -532,7 +566,8 @@ async fn main() {
         shutdown: shutdown.clone(),
     });
 
-    tray::run(config.port, player_state.clone(), shutdown.clone());
+    spawn_config_watcher(state.clone(), pre_override);
+    tray::run(config.port as u16, player_state.clone(), shutdown.clone());
     log_debug!("tray icon initialized");
 
     let app = Router::new()
@@ -548,7 +583,7 @@ async fn main() {
         .route("/api/shutdown", post(shutdown_handler))
         .route("/stream", get(stream_handler))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state.clone());
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -574,30 +609,9 @@ async fn main() {
     shutdown_signal(shutdown, false).await;
     log_info!("shutting down");
 
-    // stream clients (OBS, VLC) hold infinite connections; do not wait for them
+    // NOTE: stream clients (OBS, VLC) hold infinite connections; do not wait for them
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 
-    let path = config_path();
-    let mut config = config;
-    {
-        let s = player_state.read().expect("player state poisoned");
-        config.volume = s.volume;
-        config.current_playlist_index = s.playlist_index;
-    }
-    config.shuffle = shuffle_flag.load(std::sync::atomic::Ordering::Relaxed);
-    config.playlists = playlists_shared
-        .read()
-        .expect("playlists poisoned")
-        .clone();
-    match serde_json::to_string_pretty(&config) {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(&path, text) {
-                log_error!("failed to save config to {}: {e}", path.display());
-            } else {
-                log_debug!("final config saved to {}", path.display());
-            }
-        }
-        Err(e) => log_error!("failed to serialize config: {e}"),
-    }
+    save_snapshot(&state);
     log_info!("shutdown complete");
 }

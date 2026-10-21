@@ -2,18 +2,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
+use crate::config::Playlist;
 use crate::{audio, pump};
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Playlist {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub path: String,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -116,7 +108,7 @@ pub fn spawn(
         );
 
         loop {
-            // snapshot: additions via POST /api/playlists apply on the next iteration
+            // NOTE: snapshot: additions via POST /api/playlists apply on the next iteration
             let playlists = task_playlists.read().expect("playlists poisoned").clone();
 
             if let Some(new_idx) = switch.take() {
