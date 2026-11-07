@@ -1,10 +1,11 @@
 #![windows_subsystem = "windows"]
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, Response};
-use axum::{Json, Router, routing::get, routing::post};
+use axum::routing::{get, patch, post};
+use axum::{Json, Router};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -281,6 +282,24 @@ struct AddPlaylistRequest {
     path: String,
 }
 
+fn validate_playlist(kind: &str, path: &str) -> Result<(), String> {
+    match kind {
+        "local_folder" => match audio::scan_folder(std::path::Path::new(path)) {
+            Ok(files) if files.is_empty() => Err(format!("no audio files in '{path}'")),
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("cannot scan '{path}': {e}")),
+        },
+        "network_radio" => {
+            if path.starts_with("http://") || path.starts_with("https://") {
+                Ok(())
+            } else {
+                Err(format!("'{path}' is not an http(s) URL"))
+            }
+        }
+        other => Err(format!("unknown type '{other}'")),
+    }
+}
+
 async fn add_playlist_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddPlaylistRequest>,
@@ -292,34 +311,9 @@ async fn add_playlist_handler(
         return StatusCode::BAD_REQUEST;
     }
 
-    match req.kind.as_str() {
-        "local_folder" => match audio::scan_folder(std::path::Path::new(path)) {
-            Ok(files) if !files.is_empty() => {
-                log_info!(
-                    "add playlist: validated local folder '{}' ({} files)",
-                    path,
-                    files.len()
-                );
-            }
-            Ok(_) => {
-                log_warn!("add playlist rejected: no audio files in '{path}'");
-                return StatusCode::BAD_REQUEST;
-            }
-            Err(e) => {
-                log_error!("add playlist rejected: cannot scan '{path}': {e}");
-                return StatusCode::BAD_REQUEST;
-            }
-        },
-        "network_radio" => {
-            if !(path.starts_with("http://") || path.starts_with("https://")) {
-                log_warn!("add playlist rejected: '{path}' is not an http(s) URL");
-                return StatusCode::BAD_REQUEST;
-            }
-        }
-        other => {
-            log_warn!("add playlist rejected: unknown type '{other}'");
-            return StatusCode::BAD_REQUEST;
-        }
+    if let Err(e) = validate_playlist(&req.kind, path) {
+        log_warn!("add playlist rejected: {e}");
+        return StatusCode::BAD_REQUEST;
     }
 
     {
@@ -336,6 +330,117 @@ async fn add_playlist_handler(
             playlists.len()
         );
     }
+    save_snapshot(&state);
+    StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct UpdatePlaylistRequest {
+    name: Option<String>,
+    path: Option<String>,
+}
+
+async fn update_playlist_handler(
+    State(state): State<Arc<AppState>>,
+    Path(index): Path<usize>,
+    Json(req): Json<UpdatePlaylistRequest>,
+) -> StatusCode {
+    let updated = {
+        let mut playlists = state.playlists.write().expect("playlists poisoned");
+        let Some(playlist) = playlists.get(index).cloned() else {
+            log_warn!("update playlist rejected: index {index} does not exist");
+            return StatusCode::NOT_FOUND;
+        };
+
+        let name = match req.name.as_deref() {
+            Some(raw) => raw.trim().to_string(),
+            None => playlist.name.clone(),
+        };
+        let path = match req.path.as_deref() {
+            Some(raw) => raw.trim().to_string(),
+            None => playlist.path.clone(),
+        };
+        if name.is_empty() || path.is_empty() {
+            log_warn!("update playlist rejected: empty name or path");
+            return StatusCode::BAD_REQUEST;
+        }
+
+        let path_changed = path != playlist.path;
+        if path_changed && let Err(e) = validate_playlist(&playlist.kind, &path) {
+            log_warn!("update playlist rejected: {e}");
+            return StatusCode::BAD_REQUEST;
+        }
+
+        let updated = Playlist {
+            name,
+            kind: playlist.kind,
+            path,
+        };
+        playlists[index] = updated.clone();
+        (updated, path_changed)
+    };
+
+    let (updated, path_changed) = updated;
+    let current = state
+        .player
+        .read()
+        .expect("player state poisoned")
+        .playlist_index;
+    if path_changed
+        && index == current
+        && state
+            .cmd_tx
+            .try_send(player::Command::SwitchTo(index))
+            .is_err()
+    {
+        log_error!("failed to queue the reload of playlist index {index}");
+    }
+    log_info!(
+        "updated playlist index {index} ('{}'): {}",
+        updated.name,
+        updated.path
+    );
+    save_snapshot(&state);
+    StatusCode::OK
+}
+
+async fn delete_playlist_handler(
+    State(state): State<Arc<AppState>>,
+    Path(index): Path<usize>,
+) -> StatusCode {
+    let removed = {
+        let mut playlists = state.playlists.write().expect("playlists poisoned");
+        if index >= playlists.len() {
+            log_warn!("delete playlist rejected: index {index} does not exist");
+            return StatusCode::NOT_FOUND;
+        }
+        if playlists.len() == 1 {
+            log_warn!("delete playlist rejected: at least one playlist must remain");
+            return StatusCode::CONFLICT;
+        }
+        playlists.remove(index)
+    };
+    let remaining = state.playlists.read().expect("playlists poisoned").len();
+
+    let current = state
+        .player
+        .read()
+        .expect("player state poisoned")
+        .playlist_index;
+    if index < current {
+        let mut s = state.player.write().expect("player state poisoned");
+        s.playlist_index = current - 1;
+    } else if index == current {
+        let next = index.min(remaining - 1);
+        {
+            let mut s = state.player.write().expect("player state poisoned");
+            s.playlist_index = next;
+        }
+        if state.cmd_tx.try_send(player::Command::SwitchTo(next)).is_err() {
+            log_error!("failed to queue the switch to playlist index {next}");
+        }
+    }
+    log_info!("removed playlist '{}' at index {index}", removed.name);
     save_snapshot(&state);
     StatusCode::OK
 }
@@ -580,6 +685,10 @@ async fn main() {
             "/api/playlists",
             get(list_playlists_handler).post(add_playlist_handler),
         )
+        .route(
+            "/api/playlists/{index}",
+            patch(update_playlist_handler).delete(delete_playlist_handler),
+        )
         .route("/api/shutdown", post(shutdown_handler))
         .route("/stream", get(stream_handler))
         .layer(CorsLayer::permissive())
@@ -596,7 +705,7 @@ async fn main() {
 
     log_info!("music-player backend listening on http://{addr}");
     log_debug!(
-        "routes: / /api/health /api/control /api/volume /api/now_playing /api/playlists /api/shutdown /stream"
+        "routes: / /api/health /api/control /api/volume /api/now_playing /api/playlists /api/playlists/<index> /api/shutdown /stream"
     );
 
     let server_shutdown = shutdown.clone();

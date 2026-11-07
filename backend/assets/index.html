@@ -17,6 +17,8 @@
   li.playlist { padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 0.4rem; background: #2e2f34; }
   li.playlist.current { outline: 2px solid #38bdf8; }
   li .meta { color: #a1a1aa; font-size: 0.8rem; }
+  li .actions { display: flex; gap: 0.4rem; margin-top: 0.4rem; }
+  li .actions button { padding: 0.25rem 0.6rem; font-size: 0.8rem; }
   #status { font-size: 1.05rem; }
   #vol { width: 140px; }
   .error { color: #f87171; font-size: 0.85rem; }
@@ -38,6 +40,7 @@
 
 <h2>Playlists</h2>
 <ul id="playlists"></ul>
+<div id="list-error" class="error"></div>
 
 <h2>Add playlist</h2>
 <div class="card">
@@ -56,16 +59,98 @@
 <script>
 const api = (path, opts) => fetch(path, opts).then(r => r.ok ? r : Promise.reject(r.status));
 
+function showListError(text) {
+  document.getElementById('list-error').textContent = text;
+}
+
+function errorText(status) {
+  if (status === 400) return 'invalid name or path (a folder must contain audio files)';
+  if (status === 404) return 'the playlist no longer exists';
+  if (status === 409) return 'at least one playlist must remain';
+  return `request failed (HTTP ${status})`;
+}
+
+function playlistRow(p, i, current) {
+  const li = document.createElement('li');
+  li.className = 'playlist' + (i === current ? ' current' : '');
+
+  const name = document.createElement('div');
+  name.textContent = p.name;
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = `${p.type} - ${p.path}`;
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+
+  const rename = document.createElement('button');
+  rename.textContent = 'Rename';
+  rename.onclick = () => renamePlaylist(i, p.name);
+
+  const change = document.createElement('button');
+  change.textContent = p.type === 'network_radio' ? 'Change URL' : 'Change folder';
+  change.onclick = () => changePath(i, p);
+
+  const remove = document.createElement('button');
+  remove.textContent = 'Delete';
+  remove.onclick = () => deletePlaylist(i, p.name);
+
+  actions.append(rename, change, remove);
+  li.append(name, meta, actions);
+  return li;
+}
+
 async function refresh() {
   const data = await api('/api/playlists').then(r => r.json());
   const ul = document.getElementById('playlists');
   ul.innerHTML = '';
-  data.playlists.forEach((p, i) => {
-    const li = document.createElement('li');
-    li.className = 'playlist' + (i === data.current ? ' current' : '');
-    li.innerHTML = `<div>${p.name}</div><div class="meta">${p.type} &mdash; ${p.path}</div>`;
-    ul.appendChild(li);
-  });
+  data.playlists.forEach((p, i) => ul.appendChild(playlistRow(p, i, data.current)));
+}
+
+async function patchPlaylist(i, body) {
+  showListError('');
+  try {
+    await api(`/api/playlists/${i}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    refresh();
+  } catch (e) {
+    showListError(errorText(e));
+  }
+}
+
+async function renamePlaylist(i, current) {
+  const name = prompt('Playlist name', current);
+  if (name === null) return;
+  if (!name.trim()) {
+    showListError('name must not be empty');
+    return;
+  }
+  patchPlaylist(i, { name: name.trim() });
+}
+
+async function changePath(i, p) {
+  const label = p.type === 'network_radio' ? 'Stream URL' : 'Folder path';
+  const path = prompt(label, p.path);
+  if (path === null) return;
+  if (!path.trim()) {
+    showListError('path must not be empty');
+    return;
+  }
+  patchPlaylist(i, { path: path.trim() });
+}
+
+async function deletePlaylist(i, name) {
+  if (!confirm(`Delete playlist "${name}"?`)) return;
+  showListError('');
+  try {
+    await api(`/api/playlists/${i}`, { method: 'DELETE' });
+    refresh();
+  } catch (e) {
+    showListError(errorText(e));
+  }
 }
 
 async function tick() {

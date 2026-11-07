@@ -31,6 +31,7 @@ pub enum Command {
     PrevPlaylist,
     NextTrack,
     ToggleShuffle,
+    SwitchTo(usize),
 }
 
 // NOTE: the supervisor resolves a command into an intent, so the player
@@ -40,6 +41,7 @@ enum Intent {
     NextPlaylist,
     PrevPlaylist,
     SkipTrack,
+    SwitchTo(usize),
 }
 
 pub struct PlayerState {
@@ -101,6 +103,13 @@ fn resolve(
         Intent::NextPlaylist => *switch = Some((switch.unwrap_or(pl_idx) + 1) % count),
         Intent::PrevPlaylist => *switch = Some((switch.unwrap_or(pl_idx) + count - 1) % count),
         Intent::SkipTrack => *skip = true,
+        Intent::SwitchTo(index) => {
+            if index < count {
+                *switch = Some(index);
+            } else {
+                log_error!("ignoring a switch to playlist index {index}: only {count} configured");
+            }
+        }
     }
 }
 
@@ -204,6 +213,11 @@ async fn supervise(
                 let _ = intents.send(intent);
                 cancel_current(&cancel_slot);
             }
+            Command::SwitchTo(index) => {
+                log_info!("command SwitchTo({index}): playlist switch requested");
+                let _ = intents.send(Intent::SwitchTo(index));
+                cancel_current(&cancel_slot);
+            }
         }
     }
 
@@ -241,6 +255,15 @@ async fn play(
         // NOTE: snapshot: additions via POST /api/playlists apply on the next iteration
         let playlists = ctx.playlists.read().expect("playlists poisoned").clone();
         let count = playlists.len();
+        // NOTE: the API keeps the index right when a playlist is removed
+        if count > 0 {
+            pl_idx = ctx
+                .state
+                .read()
+                .expect("player state poisoned")
+                .playlist_index
+                .min(count - 1);
+        }
 
         let mut skip = false;
         let mut quit = false;
