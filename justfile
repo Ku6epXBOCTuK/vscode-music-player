@@ -9,11 +9,15 @@ default:
 backend: backend-build
     -./backend/target/release/music-player-server.exe
 
+# Ask the running server on the configured port to shut down and wait for it to exit
+# The server writes its state to config.json on a graceful shutdown; a force kill loses it
+stop-server PORT="":
+    $cfg = "$HOME/bin/vscode-music-player/config.json"; $port = 45880; if (Test-Path $cfg) { $port = (Get-Content $cfg -Raw | ConvertFrom-Json).port }; if ("{{PORT}}" -ne "") { $port = {{PORT}} }; $owner = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess; if (-not $owner) { "no server on port $port"; exit 0 }; try { Invoke-WebRequest -UseBasicParsing -Method Post "http://127.0.0.1:$port/api/shutdown" -TimeoutSec 3 | Out-Null } catch {}; $deadline = (Get-Date).AddSeconds(5); while ((Get-Process -Id $owner -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 200 }; if (Get-Process -Id $owner -ErrorAction SilentlyContinue) { Stop-Process -Id $owner -Force; "server did not stop in time, killed pid $owner"; exit 1 }; "server stopped gracefully"
+
 # Stop the running server and install the release backend to ~/bin/vscode-music-player
 install: backend-build
     New-Item -ItemType Directory -Force "$HOME/bin/vscode-music-player" | Out-Null
-    -Get-Process music-player-server -ErrorAction SilentlyContinue | Stop-Process -Force
-    while (Get-Process music-player-server -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
+    just stop-server
     Copy-Item backend/target/release/music-player-server.exe "$HOME/bin/vscode-music-player/music-player-server.exe" -Force
     @echo installed to $HOME/bin/vscode-music-player
 
