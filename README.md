@@ -5,56 +5,58 @@ Code, настройки в браузере, трансляция звука в
 
 ## Что умеет
 
-- **Управление из VS Code**: Play/Pause, переключение плейлистов, громкость,
-  название текущего трека — прямо в статус-баре редактора
-- **Плейлисты**: локальные папки с музыкой (MP3, FLAC, WAV, AAC, M4A, OGG, с
-  вложенными папками) и интернет-радио (MP3/AAC-потоки)
-- **Стриминг в OBS**: бесконечный FLAC-поток по HTTP, подключается в OBS Studio
-  как Media Source
-- **Иконка в трее**: текущий трек в tooltip, открытие настроек, выход
-- **Настройки в браузере**: добавление папок и радиостанций без правки файлов
+- **Управление из VS Code**: play/pause, переключение плейлистов и треков,
+  громкость, название текущего трека в статус-баре
+- **Плейлисты**: локальные папки (MP3, FLAC, WAV, AAC, M4A, OGG, с вложенными
+  папками) и интернет-радио (MP3/AAC-потоки). Имя и путь плейлиста можно менять,
+  плейлисты удаляются, последний удалить нельзя
+- **Стриминг в OBS**: бесконечный FLAC-поток по HTTP, подключается как Media
+  Source
+- **Иконка в трее**: текущий трек в tooltip, открытие настроек
+- **Состояние переживает перезапуск**: текущий плейлист, громкость и shuffle
+  сохраняются в `config.json` при штатной остановке
 
 ## Установка
 
-### 1. Бэкенд (сервер плеера)
+Бэкенд и расширение собираются из исходников (нужны Rust, Node.js и `just`):
 
-Скопируй `music-player-server.exe` в любую папку, например
-`%USERPROFILE%\bin\vscode-music-player\`. При первом запуске рядом появится
-`config.json` с настройками по умолчанию.
+```powershell
+just install      # соберёт бэкенд и положит его в ~/bin/vscode-music-player
+just ext-install  # соберёт .vsix и поставит расширение в VS Code
+```
 
-### 2. Расширение VS Code
+После `ext-install` перезагрузи окно VS Code. Если бэкенд лежит не рядом с
+расширением, укажи путь в настройке `music-player.backendPath`.
 
-1. Собери файл: `just ext-build` → `extension/music-player-extension.vsix`
-2. VS Code → Extensions → `...` → **Install from VSIX...** → выбери файл
-3. В настройках расширения (`music-player.backendPath`) укажи полный путь к
-   `music-player-server.exe`, если он не лежит в папке проекта
+`just install` сначала останавливает запущенный сервер через `stop-server`, а не
+убивает процесс: только штатная остановка успевает записать состояние.
 
 ## Использование
 
-- Нажми **Play** в статус-баре — расширение само запустит бэкенд
-- **Настройки плеера**: правый клик по иконке в трее → Open settings, или открой
-  `http://127.0.0.1:45880` в браузере. Добавь папки с музыкой и радиостанции —
-  всё сохраняется в `config.json`
-- **Выключить плеер**: кнопка Stop в VS Code, или трей → Quit
+- **Play** в статус-баре запускает бэкенд сам, дальше кнопки управляют треками
+- **Настройки**: правый клик по иконке в трее → Open settings, или
+  `http://127.0.0.1:45880` в браузере. Папки и радиостанции добавляются и
+  редактируются оттуда, изменения сразу попадают в `config.json`
+- **Остановка**: кнопка Stop в VS Code, трей → Quit или `just stop-server`
 
 ## Подключение в OBS Studio
 
 1. Sources → `+` → **Media Source**
 2. Сними галку **Local File**
-3. В поле **Input** впиши: `http://127.0.0.1:45880/stream`
+3. В поле **Input** впиши `http://127.0.0.1:45880/stream`
 4. OK — в микшере появится живой канал
 
-Поток бесконечный, переключения треков и громкость слышны в эфире сразу. При
-перезапуске бэкенда OBS переподключается сам.
-
-Просто послушать (без эфира) поток можно и в VLC: Media → Open Network Stream →
-`http://127.0.0.1:45880/stream`.
+Поток бесконечный, переключения треков слышны в эфире сразу, при перезапуске
+бэкенда OBS переподключается сам. Для простого прослушивания тот же адрес можно
+открыть в VLC или любом другом плеере.
 
 Если транслируешь музыку аудитории (Twitch/YouTube), помни про права: обычные
-радиостанции для этого не годятся — бери stream-safe источники (NCS, StreamBeats
+радиостанции для этого не годятся, бери stream-safe источники (NCS, StreamBeats
 и подобные DMCA-free каталоги).
 
-## Настройки (config.json)
+## config.json
+
+Лежит рядом с `music-player-server.exe`, создаётся при первом запуске:
 
 ```json
 {
@@ -74,42 +76,40 @@ Code, настройки в браузере, трансляция звука в
 }
 ```
 
-- `port` — порт API и потока (в расширении VS Code та же настройка:
-  `music-player.port`; расширение передаёт порт бэкенду при запуске)
+- `port` — порт API и потока (в расширении та же настройка: `music-player.port`;
+  расширение передаёт порт бэкенду при запуске)
 - `volume` — 0.0–1.0
-- `shuffle` — режим случайного воспроизведения
-- Плейлисты удобнее добавлять через панель настроек в браузере
-- Значения проверяются при загрузке: недопустимые значения исправляются,
-  сломанные записи плейлистов пропускаются, файл переписывается в исправленном
-  виде
-- Если `config.json` повреждён (невалидный JSON), бэкенд не стартует и печатает
-  причину; файл остаётся нетронутым. Рядом лежат резервные копии:
+- `shuffle` — случайный порядок внутри локального плейлиста
+- Недопустимые значения при загрузке исправляются, сломанные записи плейлистов
+  пропускаются, файл переписывается в исправленном виде
+- Если JSON повреждён, бэкенд не стартует и печатает причину. Рядом лежат
   `config.json.bak` (предыдущая версия) и `config.json.bak.2`
 
-## Logs
+## Логи
 
-The backend writes a detailed log to `music-player.log` next to
-`music-player-server.exe` (same folder as `config.json`). The same text goes to
-the console when one is attached, so the file is the only source of truth for a
-detached run.
+Бэкенд пишет `music-player.log` рядом с `music-player-server.exe`. Тот же текст
+идёт в консоль, если она есть, но у отсоединённого процесса файл — единственный
+источник. Уровень по умолчанию `info` (`debug` в debug-сборке), переопределяется
+переменной `MUSIC_PLAYER_LOG`: `debug`, `info`, `warn`, `error`. Файл ротируется
+при 4 МБ в `music-player.log.1`.
 
-Default level is `info` (`debug` in debug builds). Override it with the
-`MUSIC_PLAYER_LOG` environment variable:
+## Разработка
 
 ```powershell
-$env:MUSIC_PLAYER_LOG = "debug"
-.\music-player-server.exe
+just                 # список рецептов
+just backend         # запустить бэкенд в release из backend/target/release
+just backend-debug   # то же с debug-логами
+just check           # clippy
+just check-stream    # записать 10 секунд /stream и проверить ffmpeg
+just status          # /api/now_playing
+just logs 100        # хвост лога
+just control pause   # play, pause, stop, next_track, next_playlist, prev_playlist, toggle_shuffle
+just volume 0.5
 ```
 
-Accepted values: `debug`, `info`, `warn`, `error`. At `debug` the log includes
-codec, sample rate and channel count per source, file sizes and decode progress.
-Once the log reaches 4 MB it is renamed to `music-player.log.1` and a fresh file
-is started.
-
-## Uninstall
-
-Delete the folder holding `music-player-server.exe` (it also holds `config.json`
-and `music-player.log`), then remove the extension from VS Code.
+Логика воспроизведения живёт в `backend/src/player.rs`, HTTP API и настройки — в
+`backend/src/main.rs`, страница настроек — `backend/assets/index.html`, команды
+и статус-бар — `extension/src/extension.ts`.
 
 ## Лицензия
 
