@@ -24,7 +24,7 @@ Code, настройки в браузере, трансляция звука в
 
 ### 2. Расширение VS Code
 
-1. Возьми файл `music-player-extension-<версия>.vsix`
+1. Собери файл: `just ext-build` → `extension/music-player-extension.vsix`
 2. VS Code → Extensions → `...` → **Install from VSIX...** → выбери файл
 3. В настройках расширения (`music-player.backendPath`) укажи полный путь к
    `music-player-server.exe`, если он не лежит в папке проекта

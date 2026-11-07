@@ -9,10 +9,11 @@ default:
 backend: backend-build
     -./backend/target/release/music-player-server.exe
 
-# Install the release backend to ~/bin/vscode-music-player
-# (config.json is created there on first run with default settings)
+# Stop the running server and install the release backend to ~/bin/vscode-music-player
 install: backend-build
     New-Item -ItemType Directory -Force "$HOME/bin/vscode-music-player" | Out-Null
+    -Get-Process music-player-server -ErrorAction SilentlyContinue | Stop-Process -Force
+    while (Get-Process music-player-server -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
     Copy-Item backend/target/release/music-player-server.exe "$HOME/bin/vscode-music-player/music-player-server.exe" -Force
     @echo installed to $HOME/bin/vscode-music-player
 
@@ -68,4 +69,8 @@ ext-setup:
 ext-build:
     pnpm --filter ./extension run compile
     Copy-Item LICENSE extension/LICENSE -Force
-    pnpm --filter ./extension exec vsce package
+    pnpm --filter ./extension exec vsce package --out music-player-extension.vsix
+
+# Build, package and install the extension into the portable VS Code; reload the window after
+ext-install: ext-build
+    C:/VSCode/VSCodeKX/bin/code.cmd --install-extension extension/music-player-extension.vsix --force
