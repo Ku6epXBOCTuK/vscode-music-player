@@ -33,7 +33,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force stage | Out-Null
-          Copy-Item backend/target/release/backend.exe stage/
+          Copy-Item backend/target/release/music-player-server.exe stage/
           Copy-Item LICENSE, README.md stage/
           Compress-Archive -Path stage/* -DestinationPath release-backend.zip
 

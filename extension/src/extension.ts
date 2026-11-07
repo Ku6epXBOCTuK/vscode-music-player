@@ -105,7 +105,10 @@ function findBackend(
 		return undefined;
 	}
 
-	const exeName = process.platform === "win32" ? "backend.exe" : "backend";
+	const exeName =
+		process.platform === "win32"
+			? "music-player-server.exe"
+			: "music-player-server";
 	const rel = path.join("backend", "target", "release", exeName);
 	const candidates: { exe: string; cwd: string }[] = [
 		{
@@ -159,7 +162,7 @@ function tailFile(file: string, maxLines = 12): string[] {
 // file catches the startup failures that happen before the log is opened.
 function backendLogTail(exeDir: string): string[] {
 	return [
-		...tailFile(path.join(exeDir, "backend-stderr.log")),
+		...tailFile(path.join(exeDir, "music-player-server-stderr.log")),
 		...tailFile(path.join(exeDir, "music-player.log")),
 	];
 }
@@ -179,7 +182,7 @@ function startBackendOnce(extensionPath: string): void {
 	}
 	backendStartAttempted = true;
 	const exeDir = path.dirname(backend.exe);
-	const stderrPath = path.join(exeDir, "backend-stderr.log");
+	const stderrPath = path.join(exeDir, "music-player-server-stderr.log");
 	let stderrFd: number | undefined;
 	try {
 		stderrFd = openSync(stderrPath, "a");

@@ -7,13 +7,13 @@ default:
 # Run the backend (release build: debug FLAC encoding is too slow)
 # The recipe ignores the exit code: Ctrl+C interrupts just itself (exit 512)
 backend: backend-build
-    -./backend/target/release/backend.exe
+    -./backend/target/release/music-player-server.exe
 
 # Install the release backend to ~/bin/vscode-music-player
 # (config.json is created there on first run with default settings)
 install: backend-build
     New-Item -ItemType Directory -Force "$HOME/bin/vscode-music-player" | Out-Null
-    Copy-Item backend/target/release/backend.exe "$HOME/bin/vscode-music-player/backend.exe" -Force
+    Copy-Item backend/target/release/music-player-server.exe "$HOME/bin/vscode-music-player/music-player-server.exe" -Force
     @echo installed to $HOME/bin/vscode-music-player
 
 # Build the backend in release mode
@@ -43,7 +43,7 @@ logs LINES="40":
 # Run the backend with debug logging enabled
 backend-debug:
     $env:MUSIC_PLAYER_LOG = "debug"
-    -./backend/target/release/backend.exe
+    -./backend/target/release/music-player-server.exe
 
 # Send a control action: play / pause / stop / next_track / next_playlist / prev_playlist / toggle_shuffle
 control ACTION="play":

@@ -18,7 +18,7 @@ Code, настройки в браузере, трансляция звука в
 
 ### 1. Бэкенд (сервер плеера)
 
-Скопируй `backend.exe` в любую папку, например
+Скопируй `music-player-server.exe` в любую папку, например
 `%USERPROFILE%\bin\vscode-music-player\`. При первом запуске рядом появится
 `config.json` с настройками по умолчанию.
 
@@ -27,7 +27,7 @@ Code, настройки в браузере, трансляция звука в
 1. Возьми файл `music-player-extension-<версия>.vsix`
 2. VS Code → Extensions → `...` → **Install from VSIX...** → выбери файл
 3. В настройках расширения (`music-player.backendPath`) укажи полный путь к
-   `backend.exe`, если он не лежит в папке проекта
+   `music-player-server.exe`, если он не лежит в папке проекта
 
 ## Использование
 
@@ -88,16 +88,17 @@ Code, настройки в браузере, трансляция звука в
 
 ## Logs
 
-The backend writes a detailed log to `music-player.log` next to `backend.exe`
-(same folder as `config.json`). The same text goes to the console when one is
-attached, so the file is the only source of truth for a detached run.
+The backend writes a detailed log to `music-player.log` next to
+`music-player-server.exe` (same folder as `config.json`). The same text goes to
+the console when one is attached, so the file is the only source of truth for a
+detached run.
 
 Default level is `info` (`debug` in debug builds). Override it with the
 `MUSIC_PLAYER_LOG` environment variable:
 
 ```powershell
 $env:MUSIC_PLAYER_LOG = "debug"
-.\backend.exe
+.\music-player-server.exe
 ```
 
 Accepted values: `debug`, `info`, `warn`, `error`. At `debug` the log includes
@@ -107,8 +108,8 @@ is started.
 
 ## Uninstall
 
-Delete the folder holding `backend.exe` (it also holds `config.json` and
-`music-player.log`), then remove the extension from VS Code.
+Delete the folder holding `music-player-server.exe` (it also holds `config.json`
+and `music-player.log`), then remove the extension from VS Code.
 
 ## Лицензия
 
