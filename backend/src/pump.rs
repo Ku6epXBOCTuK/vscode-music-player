@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use rubato::{FftFixedIn, Resampler};
 use symphonia::core::audio::SampleBuffer;
@@ -10,6 +9,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::audio;
 use crate::streamer::BLOCK_SIZE;
@@ -17,20 +17,20 @@ use crate::streamer::BLOCK_SIZE;
 const RESAMPLE_CHUNK: usize = 4096;
 
 pub enum Outcome {
-    // source ended (file finished / stream closed)
+    // NOTE: source ended (file finished / stream closed)
     Exhausted,
-    // cancelled via the flag (playlist switch)
+    // NOTE: cancelled via the token (playlist switch, skip request)
     Interrupted,
     Failed(String),
 }
 
-// Decodes any MediaSource and feeds interleaved 48 kHz stereo PCM blocks
+// NOTE: decodes any MediaSource and feeds interleaved 48 kHz stereo PCM blocks
 // into the pipeline channel as they are produced. Runs in a blocking
 // thread; `cancel` is polled between blocks and before every send.
 pub fn pump(
     source: Box<dyn MediaSource>,
     pcm_tx: &mpsc::Sender<Vec<f32>>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     prebuffer_blocks: usize,
 ) -> Outcome {
     let mss = MediaSourceStream::new(source, Default::default());
@@ -79,7 +79,7 @@ pub fn pump(
     let mut blocks_sent: u64 = 0;
 
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return Outcome::Interrupted;
         }
 
@@ -221,8 +221,8 @@ pub fn pump(
     }
 }
 
-fn finish(cancel: &AtomicBool) -> Outcome {
-    if cancel.load(Ordering::Relaxed) {
+fn finish(cancel: &CancellationToken) -> Outcome {
+    if cancel.is_cancelled() {
         Outcome::Interrupted
     } else {
         log_error!("pump: pcm channel closed (consumer gone)");
@@ -230,12 +230,12 @@ fn finish(cancel: &AtomicBool) -> Outcome {
     }
 }
 
-// try_send with a wait loop so a full channel (paused playback) does not
+// NOTE: try_send with a wait loop so a full channel (paused playback) does not
 // block cancellation forever
-fn send_block(pcm_tx: &mpsc::Sender<Vec<f32>>, block: Vec<f32>, cancel: &AtomicBool) -> bool {
+fn send_block(pcm_tx: &mpsc::Sender<Vec<f32>>, block: Vec<f32>, cancel: &CancellationToken) -> bool {
     let mut block = block;
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return false;
         }
         match pcm_tx.try_send(block) {

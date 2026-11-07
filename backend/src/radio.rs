@@ -1,23 +1,39 @@
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-use crate::player::Command;
 use crate::pump;
 
-// live sources arrive in real time, so the pipeline buffer stays near
+// NOTE: live sources arrive in real time, so the pipeline buffer stays near
 // empty without an initial prebuffer; hold back this many blocks (~3 s)
 // at session start to absorb network jitter
 const PREBUFFER_BLOCKS: usize = 36;
 
-// Synchronous Read adapter over a tokio mpsc byte channel, so symphonia
+// NOTE: a station that accepted the connection but never answered used to
+// park the player until the OS gave up, so the whole request is capped here
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const FAILURE_WAIT: Duration = Duration::from_secs(5);
+const RECONNECT_WAIT: Duration = Duration::from_secs(2);
+// NOTE: consecutive failed connections before the player moves to the next playlist
+const FAILURE_LIMIT: u32 = 3;
+
+pub enum Outcome {
+    // NOTE: the player was asked to do something else
+    Interrupted,
+    GaveUp,
+    // NOTE: the pcm consumer is gone
+    Closed,
+}
+
+// NOTE: synchronous Read adapter over a tokio mpsc byte channel, so symphonia
 // can demux a network stream inside a blocking thread.
 struct ChannelReader {
-    rx: std::sync::Mutex<mpsc::Receiver<Bytes>>,
+    rx: Mutex<mpsc::Receiver<Bytes>>,
     current: Option<Bytes>,
     pos: usize,
 }
@@ -67,52 +83,81 @@ impl symphonia::core::io::MediaSource for ChannelReader {
     }
 }
 
-// Streams one radio station until a playlist switch is requested.
-// Returns the new playlist index, or None when the pcm channel is closed.
+fn client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .user_agent(concat!("music-player/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|e| {
+                log_error!("radio: cannot build the HTTP client: {e}");
+                reqwest::Client::new()
+            })
+    })
+}
+
+async fn sleep_or_cancel(cancel: &CancellationToken, duration: Duration) -> bool {
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        _ = tokio::time::sleep(duration) => true,
+    }
+}
+
+// NOTE: streams one radio station until the token is cancelled or the station
+// keeps failing; reconnects on its own between those two events
 pub async fn run(
     url: &str,
     pcm_tx: &mpsc::Sender<Vec<f32>>,
-    cmd_rx: &mut mpsc::Receiver<Command>,
-    shuffle: &AtomicBool,
-    playlist_count: usize,
-    pl_idx: usize,
-) -> Option<usize> {
+    cancel: &CancellationToken,
+) -> Outcome {
+    let mut failures: u32 = 0;
     loop {
-        let attempt = {
-            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+        if pcm_tx.is_closed() {
+            log_warn!("radio: pcm channel closed, stopping");
+            return Outcome::Closed;
+        }
+        if cancel.is_cancelled() {
+            return Outcome::Interrupted;
+        }
+
+        let attempt = failures + 1;
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return Outcome::Interrupted,
+            res = tokio::time::timeout(CONNECT_TIMEOUT, client().get(url).send()) => res,
         };
-        let response = match reqwest::get(url).await {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                log_error!(
-                    "radio: station returned HTTP {} (attempt {attempt})",
-                    r.status()
-                );
-                if let Some(next) = wait_or_switch(cmd_rx, shuffle, playlist_count, pl_idx, 5).await {
-                    return Some(next);
+        let response = match result {
+            Ok(Ok(r)) if r.status().is_success() => Ok(r),
+            Ok(Ok(r)) => Err(format!("station returned HTTP {}", r.status())),
+            Ok(Err(e)) => Err(format!("connection failed: {e}")),
+            Err(_) => Err(format!("no response within {}s", CONNECT_TIMEOUT.as_secs())),
+        };
+        let response = match response {
+            Ok(r) => r,
+            Err(reason) => {
+                failures += 1;
+                log_error!("radio: {reason} (attempt {attempt}/{FAILURE_LIMIT})");
+                if failures >= FAILURE_LIMIT {
+                    log_warn!("radio: {failures} failed connections to {url}, giving up");
+                    return Outcome::GaveUp;
                 }
-                continue;
-            }
-            Err(e) => {
-                log_error!("radio: connection failed (attempt {attempt}): {e}");
-                if let Some(next) = wait_or_switch(cmd_rx, shuffle, playlist_count, pl_idx, 5).await {
-                    return Some(next);
+                if !sleep_or_cancel(cancel, FAILURE_WAIT).await {
+                    return Outcome::Interrupted;
                 }
                 continue;
             }
         };
 
         log_info!("radio: connected to {url} (attempt {attempt})");
+        failures = 0;
         let (byte_tx, byte_rx) = mpsc::channel::<Bytes>(128);
         let reader = ChannelReader {
-            rx: std::sync::Mutex::new(byte_rx),
+            rx: Mutex::new(byte_rx),
             current: None,
             pos: 0,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
-        let pump_cancel = cancel.clone();
         let pump_tx = pcm_tx.clone();
+        let pump_cancel = cancel.clone();
         let decode_handle = tokio::task::spawn_blocking(move || {
             pump::pump(Box::new(reader), &pump_tx, &pump_cancel, PREBUFFER_BLOCKS)
         });
@@ -121,32 +166,9 @@ pub async fn run(
         let mut total_bytes: u64 = 0;
         loop {
             tokio::select! {
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(Command::ToggleShuffle) => {
-                            toggle_shuffle(shuffle);
-                            continue;
-                        }
-                        Some(Command::NextTrack) => {
-                            log_debug!("radio: next track has no effect on a live stream");
-                            continue;
-                        }
-                        Some(Command::NextPlaylist) => {
-                            log_info!("radio: playlist switch requested, stopping stream");
-                            stop_stream(&cancel, byte_tx);
-                            return Some((pl_idx + 1) % playlist_count);
-                        }
-                        Some(Command::PrevPlaylist) => {
-                            log_info!("radio: playlist switch requested, stopping stream");
-                            stop_stream(&cancel, byte_tx);
-                            return Some((pl_idx + playlist_count - 1) % playlist_count);
-                        }
-                        None => {
-                            log_warn!("radio: command channel closed, stopping stream");
-                            stop_stream(&cancel, byte_tx);
-                            return None;
-                        }
-                    }
+                _ = cancel.cancelled() => {
+                    log_info!("radio: stopping the stream after {total_bytes} bytes");
+                    break;
                 }
                 chunk = stream.next() => {
                     match chunk {
@@ -180,50 +202,15 @@ pub async fn run(
             Err(e) => log_error!("radio: decode task panicked: {e}"),
         }
 
-        if let Some(next) = wait_or_switch(cmd_rx, shuffle, playlist_count, pl_idx, 2).await {
-            return Some(next);
+        if cancel.is_cancelled() {
+            return Outcome::Interrupted;
+        }
+        if pcm_tx.is_closed() {
+            log_warn!("radio: pcm channel closed, stopping");
+            return Outcome::Closed;
+        }
+        if !sleep_or_cancel(cancel, RECONNECT_WAIT).await {
+            return Outcome::Interrupted;
         }
     }
-}
-
-// Waits `secs` for a playlist switch command; returns None on timeout.
-async fn wait_or_switch(
-    cmd_rx: &mut mpsc::Receiver<Command>,
-    shuffle: &AtomicBool,
-    playlist_count: usize,
-    pl_idx: usize,
-    secs: u64,
-) -> Option<usize> {
-    let wait = tokio::time::sleep(std::time::Duration::from_secs(secs));
-    tokio::pin!(wait);
-    loop {
-        tokio::select! {
-            cmd = cmd_rx.recv() => match cmd {
-                Some(Command::NextPlaylist) => return Some((pl_idx + 1) % playlist_count),
-                Some(Command::PrevPlaylist) => {
-                    return Some((pl_idx + playlist_count - 1) % playlist_count);
-                }
-                Some(Command::ToggleShuffle) => toggle_shuffle(shuffle),
-                Some(Command::NextTrack) => {
-                    log_debug!("radio: next track has no effect on a live stream")
-                }
-                None => return None,
-            },
-            _ = &mut wait => return None,
-        }
-    }
-}
-
-fn toggle_shuffle(shuffle: &AtomicBool) {
-    let now = !shuffle.load(Ordering::Relaxed);
-    shuffle.store(now, Ordering::Relaxed);
-    log_info!(
-        "shuffle turned {} (the radio stream keeps playing)",
-        if now { "on" } else { "off" }
-    );
-}
-
-fn stop_stream(cancel: &AtomicBool, byte_tx: mpsc::Sender<Bytes>) {
-    cancel.store(true, Ordering::Relaxed);
-    drop(byte_tx);
 }
