@@ -2,6 +2,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [0.4.0](https://github.com/Ku6epXBOCTuK/music-player/compare/60733e733374e14b638d7b42d6db5b849f07edf3..0.4.0) - 2026-11-07
+#### Features
+- add edit playlist flow from frontend - ([c313a26](https://github.com/Ku6epXBOCTuK/music-player/commit/c313a268fbbfc9db6b5e3000d6b704c11756a5c4)) - Ku6epXBOCTuK
+- separate user commands interface, radio timeout - ([60733e7](https://github.com/Ku6epXBOCTuK/music-player/commit/60733e733374e14b638d7b42d6db5b849f07edf3)) - Ku6epXBOCTuK
+
+- - -
+
 ## [0.3.0](https://github.com/Ku6epXBOCTuK/music-player/compare/52aa0b0e5c109147d590c479c6a666f7e9dbe59f..0.3.0) - 2026-10-21
 #### Features
 - update config workflow, add backend logging to extension - ([52aa0b0](https://github.com/Ku6epXBOCTuK/music-player/commit/52aa0b0e5c109147d590c479c6a666f7e9dbe59f)) - Ku6epXBOCTuK
